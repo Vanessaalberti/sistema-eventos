@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Eventos POS — Pedidos, Caja y Ticketera</title>
+  <link rel="stylesheet" href="/static/css/styles.css" />
+</head>
+<body>
+  <!-- BARRA SUPERIOR (NO SE IMPRIME) -->
+  <header class="topbar no-print">
+    <div class="brand">
+      <div class="brand-logo">POS</div>
+      <div>
+        <h1 id="header-event-name">Evento General</h1>
+        <span class="subtitle">Próximo Ticket: <strong id="header-next-ticket">#001</strong> · Red local: <code id="header-lan-url">http://localhost:8080</code></span>
+      </div>
+    </div>
+
+    <nav class="nav-tabs">
+      <button class="tab-btn active" data-tab="pos">Tomar Pedido</button>
+      <button class="tab-btn" data-tab="catalog">Catálogo y Stock</button>
+      <button class="tab-btn" data-tab="orders">Historial y Caja</button>
+      <button class="tab-btn" data-tab="settings">Ticketera y Evento</button>
+    </nav>
+  </header>
+
+  <!-- CONTENEDOR PRINCIPAL -->
+  <main class="main-container no-print">
+
+    <!-- ==========================================
+         VISTA 1: TOMAR PEDIDO Y COBRAR (POS)
+         ========================================== -->
+    <section id="tab-pos" class="tab-view active">
+      <div class="pos-layout">
+        <!-- Catálogo de Productos -->
+        <div class="catalog-panel">
+          <div class="catalog-Toolbar">
+            <input type="search" id="pos-search" class="search-input" placeholder="Buscar producto o combo... (Ej: Hamburguesa, Bebida)" />
+            <div id="category-pills" class="category-pills"></div>
+          </div>
+          <div id="pos-products-grid" class="products-grid"></div>
+        </div>
+
+        <!-- Carrito / Cobro -->
+        <aside class="cart-panel">
+          <div class="cart-header">
+            <h2>Pedido Actual</h2>
+            <button id="btn-clear-cart" class="btn btn-ghost btn-sm">Vaciar</button>
+          </div>
+
+          <div id="cart-items" class="cart-items">
+            <div class="empty-cart">Seleccioná productos del catálogo para armar el pedido.</div>
+          </div>
+
+          <div class="cart-checkout">
+            <div class="note-row">
+              <input type="text" id="order-notes" class="input-field" placeholder="Nota opcional (Ej: Sin mayonesa / Nombre cliente)" />
+            </div>
+
+            <div class="payment-section">
+              <label class="section-label">Medio de Pago</label>
+              <div class="payment-methods">
+                <button type="button" class="pay-btn active" data-method="efectivo">💵 Efectivo</button>
+                <button type="button" class="pay-btn" data-method="transferencia">📱 Mercado Pago</button>
+                <button type="button" class="pay-btn" data-method="tarjeta">💳 Tarjeta</button>
+              </div>
+            </div>
+
+            <!-- Alias Mercado Pago visible cuando se elige Transferencia -->
+            <div id="mp-box" class="cash-box hidden" style="border-color: #38bdf8; background: rgba(56, 189, 248, 0.08);">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span class="muted">Alias Mercado Pago:</span>
+                <strong id="mp-alias-display" style="font-size:1.15rem; color:#38bdf8; letter-spacing:0.5px;">araucana24</strong>
+              </div>
+            </div>
+
+            <!-- Calculadora de vuelto para Efectivo -->
+            <div id="cash-box" class="cash-box">
+              <div class="cash-inputs">
+                <div>
+                  <label>Paga con ($)</label>
+                  <input type="number" id="cash-received" class="input-field" placeholder="Exacto" min="0" step="100" />
+                </div>
+                <div class="change-display">
+                  <span>Vuelto a entregar</span>
+                  <strong id="cash-change">$0</strong>
+                </div>
+              </div>
+              <div class="quick-cash-btns" id="quick-cash-btns">
+                <button type="button" class="chip-btn" data-cash="exact">Justo</button>
+                <button type="button" class="chip-btn" data-cash="2000">$2.000</button>
+                <button type="button" class="chip-btn" data-cash="5000">$5.000</button>
+                <button type="button" class="chip-btn" data-cash="10000">$10.000</button>
+                <button type="button" class="chip-btn" data-cash="20000">$20.000</button>
+              </div>
+            </div>
+
+            <div class="total-bar">
+              <span>TOTAL A COBRAR</span>
+              <strong id="cart-total">$0</strong>
+            </div>
+
+            <button id="btn-submit-order" class="btn btn-primary btn-charge" disabled>
+              🖨️ COBRAR E IMPRIMIR TICKET
+            </button>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ==========================================
+         VISTA 2: CATÁLOGO DE PRODUCTOS Y STOCK
+         ========================================== -->
+    <section id="tab-catalog" class="tab-view">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div>
+            <h2>Catálogo de Productos, Combos y Stock</h2>
+            <p class="muted">Editá precios, creá combos o ajustá el límite de unidades disponibles para este evento.</p>
+          </div>
+          <button id="btn-new-product" class="btn btn-primary">+ Nuevo Producto / Combo</button>
+        </div>
+
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Producto / Combo</th>
+                <th>Categoría</th>
+                <th>Precio</th>
+                <th>Control de Stock</th>
+                <th>Estado</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="catalog-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==========================================
+         VISTA 3: HISTORIAL DE PEDIDOS Y CAJA
+         ========================================== -->
+    <section id="tab-orders" class="tab-view">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span>Total Recaudado</span>
+          <strong id="stat-total-revenue">$0</strong>
+        </div>
+        <div class="stat-card">
+          <span>Pedidos Cobrados</span>
+          <strong id="stat-count-orders">0</strong>
+        </div>
+        <div class="stat-card">
+          <span>💵 Efectivo</span>
+          <strong id="stat-cash">$0</strong>
+        </div>
+        <div class="stat-card">
+          <span>📱 Transferencia / 💳 Tarjeta</span>
+          <strong id="stat-digital">$0</strong>
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="panel-header">
+          <h2>Últimos Tickets Emitidos</h2>
+        </div>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Ticket</th>
+                <th>Hora</th>
+                <th>Detalle del Pedido</th>
+                <th>Medio de Pago</th>
+                <th>Total</th>
+                <th>Estado</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="orders-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==========================================
+         VISTA 4: CONFIGURACIÓN DE TICKETERA Y EVENTO
+         ========================================== -->
+    <section id="tab-settings" class="tab-view">
+      <div class="settings-grid">
+        <div class="panel-card">
+          <h2>Configuración de Ticketera Térmica</h2>
+          <p class="muted">Configurá el ancho de papel y el método de impresión de los tickets.</p>
+
+          <form id="settings-form" class="form-stack">
+            <div class="form-group">
+              <label>Nombre del Evento (encabezado del ticket)</label>
+              <input type="text" id="set-event-name" class="input-field" required />
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label>Ancho de Rollo Térmico</label>
+                <select id="set-paper-width" class="input-field">
+                  <option value="80">80 mm (Estándar grande)</option>
+                  <option value="58">58 mm (Ticketera compacta)</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label>Formato de Ticket</label>
+                <select id="set-double-ticket" class="input-field">
+                  <option value="1">Doble Talón: Cliente + Barra/Cocina</option>
+                  <option value="0">Simple: Solo Comprobante Cliente</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Modo de Impresión</label>
+              <select id="set-print-mode" class="input-field">
+                <option value="browser">Impresión desde Navegador / Windows (58mm/80mm universal)</option>
+                <option value="network_escpos">Directo ESC/POS por Red / Wi-Fi (IP Puerto 9100 sin diálogo)</option>
+                <option value="windows_raw">Directo ESC/POS por Cola USB de Windows (RAW sin diálogo)</option>
+              </select>
+            </div>
+
+            <div id="network-printer-fields" class="form-row hidden">
+              <div class="form-group">
+                <label>IP de la Ticketera de Red</label>
+                <input type="text" id="set-printer-ip" class="input-field" placeholder="192.168.1.200" />
+              </div>
+              <div class="form-group">
+                <label>Puerto TCP</label>
+                <input type="number" id="set-printer-port" class="input-field" placeholder="9100" />
+              </div>
+            </div>
+
+            <div id="windows-printer-fields" class="form-group hidden">
+              <label>Impresora Instalada en Windows</label>
+              <select id="set-printer-name" class="input-field">
+                <option value="">-- Impresora predeterminada de Windows --</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label>Mensaje al pie del ticket</label>
+              <input type="text" id="set-ticket-footer" class="input-field" placeholder="¡Gracias por tu compra!" />
+            </div>
+
+            <button type="submit" class="btn btn-primary">Guardar Configuración</button>
+          </form>
+        </div>
+
+        <div class="panel-card">
+          <h2>Gestión del Evento</h2>
+          <p class="muted">Podés reiniciar el contador de tickets al comenzar una nueva jornada o evento.</p>
+          <div class="action-box">
+            <h4>Reiniciar numeración a #001</h4>
+            <p class="muted">Vuelve el contador de tickets a #001 manteniendo el historial actual.</p>
+            <button type="button" id="btn-reset-seq" class="btn btn-outline">Reiniciar Contador a #001</button>
+          </div>
+          <div class="action-box danger-box">
+            <h4>Nuevo Evento (Limpiar ventas y reiniciar a #001)</h4>
+            <p class="muted">Borra el historial de pedidos del evento anterior y reinicia el contador a #001 (mantiene los productos y precios).</p>
+            <button type="button" id="btn-reset-all" class="btn btn-danger">Iniciar Nuevo Evento desde Cero</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ==========================================
+       MODAL CREAR / EDITAR PRODUCTO O COMBO
+       ========================================== -->
+  <div id="product-modal" class="modal-backdrop hidden no-print">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="product-modal-title">Nuevo Producto</h3>
+        <button type="button" id="btn-close-product-modal" class="btn-close">✕</button>
+      </div>
+      <form id="product-form" class="form-stack">
+        <input type="hidden" id="prod-id" />
+        <div class="form-group">
+          <label>Nombre del Producto o Combo</label>
+          <input type="text" id="prod-name" class="input-field" required placeholder="Ej: Hamburguesa Completa" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Categoría / Sector</label>
+            <input type="text" id="prod-category" class="input-field" required placeholder="Ej: Comida, Bebidas, Barra, Combos" />
+          </div>
+          <div class="form-group">
+            <label>Precio ($)</label>
+            <input type="number" id="prod-price" class="input-field" required min="0" step="50" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Descripción corta (opcional)</label>
+          <input type="text" id="prod-desc" class="input-field" placeholder="Ej: Incluye papas y lata 354ml" />
+        </div>
+        <div class="form-row">
+          <label class="checkbox-label">
+            <input type="checkbox" id="prod-is-combo" />
+            <span>Es un Combo promocional</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="prod-active" checked />
+            <span>Visible para la venta</span>
+          </label>
+        </div>
+        <div class="form-row stock-config-row">
+          <label class="checkbox-label">
+            <input type="checkbox" id="prod-stock-enabled" checked />
+            <span>Controlar límite de stock en el evento</span>
+          </label>
+          <div class="form-group" id="prod-stock-qty-group">
+            <label>Unidades disponibles</label>
+            <input type="number" id="prod-stock-qty" class="input-field" value="50" min="0" />
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="btn-cancel-product" class="btn btn-ghost">Cancelar</button>
+          <button type="submit" class="btn btn-primary">Guardar Producto</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       MODAL DE VISTA PREVIA / IMPRESIÓN DE TICKET
+       ========================================== -->
+  <div id="ticket-modal" class="modal-backdrop hidden no-print">
+    <div class="modal-card ticket-modal-card">
+      <div class="modal-header">
+        <h3>Ticket Generado Correctamente</h3>
+        <button type="button" id="btn-close-ticket-modal" class="btn-close">✕</button>
+      </div>
+      <div class="ticket-modal-body">
+        <div id="ticket-preview-box" class="ticket-preview-wrapper"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="btn-modal-new-order" class="btn btn-ghost">Cerrar (Nuevo Pedido)</button>
+        <button type="button" id="btn-modal-print" class="btn btn-primary">🖨️ Imprimir Ticket Ahora</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       ÁREA EXCLUSIVA DE IMPRESIÓN TÉRMICA (58mm / 80mm)
+       ========================================== -->
+  <div id="thermal-print-area" class="print-only"></div>
+
+  <div id="toast-container" class="toast-container no-print"></div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

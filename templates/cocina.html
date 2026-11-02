@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>COCINA — Comandera y Tickets en Tiempo Real</title>
+  <link rel="stylesheet" href="/static/css/styles.css" />
+</head>
+<body>
+  <!-- BARRA SUPERIOR DEL PROGRAMA DE COCINA -->
+  <header class="topbar kitchen-topbar no-print">
+    <div class="brand">
+      <div class="brand-logo" style="background:#f59e0b; color:#1e293b;">COCINA</div>
+      <div>
+        <h1 id="kitchen-event-name">Asociación Juvenil Araucana — Monitor de Cocina</h1>
+        <span class="subtitle">Sincronizado en vivo con Caja · Recibe pedidos pagos y genera comandas automáticamente</span>
+      </div>
+    </div>
+
+    <div class="kitchen-controls">
+      <div class="k-badges">
+        <span class="k-stat pending">Pendientes: <strong id="k-count-pending">0</strong></span>
+        <span class="k-stat finished">Finalizados: <strong id="k-count-finished">0</strong></span>
+      </div>
+
+      <label class="auto-print-toggle" title="Cuando llega un pedido nuevo desde Caja, se imprime automáticamente el ticket de cocina">
+        <input type="checkbox" id="chk-auto-print" checked />
+        <span>🖨️ Auto-imprimir ticket al recibir pedido</span>
+      </label>
+    </div>
+  </header>
+
+  <main class="main-container no-print">
+    <!-- TABLERO DE PEDIDOS PENDIENTES / EN PREPARACIÓN -->
+    <section class="kitchen-section">
+      <div class="section-header-bar">
+        <h2>🔥 Pedidos en Curso (Para Preparar y Entregar)</h2>
+        <span id="sync-indicator" class="sync-pill">● Conectado en tiempo real</span>
+      </div>
+
+      <div id="kitchen-active-grid" class="kitchen-grid"></div>
+    </section>
+
+    <!-- HISTORIAL DE PEDIDOS FINALIZADOS RECIENTES -->
+    <section class="kitchen-section" style="margin-top: 2rem;">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div>
+            <h2>✅ Últimos Pedidos Finalizados / Entregados</h2>
+            <p class="muted">Podés reimprimir el ticket o reabrir un pedido si se marcó como finalizado por error.</p>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Ticket</th>
+                <th>Hora Pedido</th>
+                <th>Hora Finalizado</th>
+                <th>Ítems Preparados</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody id="kitchen-finished-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ÁREA DE IMPRESIÓN TÉRMICA DE LA COMANDA DE COCINA -->
+  <div id="thermal-print-area" class="print-only"></div>
+
+  <div id="toast-container" class="toast-container no-print"></div>
+
+  <script src="/static/js/cocina.js"></script>
+</body>
+</html>

@@ -1,0 +1,3 @@
+# El servidor funciona de forma nativa con la librería estándar de Python 3 (sqlite3 + http.server).
+# Opcional: Instalar pywin32 únicamente si deseas enviar comandos ESC/POS RAW directo por cola USB de Windows sin diálogo del navegador:
+pywin32>=306; sys_platform == 'win32'
