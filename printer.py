@@ -401,6 +401,105 @@ def print_ticket_direct(order: dict, settings: dict, only_kitchen: bool = False)
     return printer_name
 
 
+def format_cash_closure_text(session_data: dict, settings: dict) -> str:
+    cols = get_cols(settings)
+    sep_eq = "=" * cols
+    sep_dash = "-" * cols
+
+    lines = [
+        sep_eq,
+        clean_ascii(session_data.get("event_name", "ASOCIACION JUVENIL ARAUCANA")).upper().center(cols),
+        "CIERRE Y ARQUEO DE CAJA (TICKET Z)".center(cols),
+        sep_eq,
+        _two_cols("CAJA NRO:", f"#{session_data.get('id', 1):03d}", cols),
+        _two_cols("APERTURA:", str(session_data.get("opened_at", "")), cols),
+        _two_cols("CIERRE:", str(session_data.get("closed_at") or "EN CURSO"), cols),
+        _two_cols("PEDIDOS COBRADOS:", str(session_data.get("orders_count", 0)), cols),
+        sep_dash,
+        "1. RESUMEN POR MEDIO DE PAGO".center(cols),
+        sep_dash,
+        _two_cols("VENTAS EFECTIVO:", format_currency(session_data.get("cash_sales", 0)), cols),
+        _two_cols("MERCADO PAGO:", format_currency(session_data.get("mp_sales", 0)), cols),
+        _two_cols("TARJETA:", format_currency(session_data.get("card_sales", 0)), cols),
+        sep_dash,
+        _two_cols("TOTAL RECAUDADO:", format_currency(session_data.get("total_sales", 0)), cols),
+        sep_eq,
+        "2. ARQUEO DE EFECTIVO EN CAJON".center(cols),
+        sep_dash,
+        _two_cols("FONDO INICIAL:", format_currency(session_data.get("opening_cash", 0)), cols),
+        _two_cols("+ VENTAS EFECTIVO:", format_currency(session_data.get("cash_sales", 0)), cols),
+        _two_cols("= EFECTIVO ESPERADO:", format_currency(session_data.get("expected_cash", 0)), cols),
+    ]
+
+    if session_data.get("counted_cash") is not None:
+        counted = float(session_data.get("counted_cash", 0))
+        diff = counted - float(session_data.get("expected_cash", 0))
+        lines.append(_two_cols("EFECTIVO CONTADO:", format_currency(counted), cols))
+        diff_str = ("+" if diff > 0 else "") + format_currency(diff)
+        lines.append(_two_cols("DIFERENCIA DE CAJA:", diff_str, cols))
+
+    ranking = session_data.get("ranking", [])
+    if ranking:
+        lines.append(sep_eq)
+        lines.append("3. PLATOS Y BEBIDAS VENDIDOS".center(cols))
+        lines.append(sep_dash)
+        for r in ranking:
+            lines.append(
+                _two_cols(f"{r['total_qty']}x {r['product_name']}", format_currency(r["total_amount"]), cols)
+            )
+
+    lines.append(sep_eq)
+    return "\n".join(lines)
+
+
+def print_cash_closure_direct(session_data: dict, settings: dict) -> str:
+    """Imprime el Ticket Z de Cierre de Caja a ancho completo (48 cols) en la Xprinter XP-80."""
+    os.makedirs(TICKETS_DIR, exist_ok=True)
+    txt = format_cash_closure_text(session_data, settings)
+    filepath = os.path.join(TICKETS_DIR, f"Cierre_Caja_{session_data.get('id', 1):03d}.txt")
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(txt + "\n")
+
+    ESC = b"\x1b"
+    GS = b"\x1d"
+    INIT = ESC + b"@"
+    FONT_A = ESC + b"M\x00"
+    LEFT_MARGIN_ZERO = GS + b"L\x00\x00"
+    PRINT_WIDTH_FULL = GS + b"W\x40\x02"
+    CUT_PAPER = GS + b"V\x41\x03"
+
+    buf = bytearray()
+    buf += INIT + FONT_A + LEFT_MARGIN_ZERO + PRINT_WIDTH_FULL
+    for line in txt.splitlines():
+        buf += (clean_ascii(line) + "\n").encode("ascii", errors="ignore")
+    buf += b"\n\n" + CUT_PAPER
+
+    printer_name = settings.get("printer_name", "").strip() or detect_preferred_thermal_printer()
+    send_to_windows_printer(bytes(buf), printer_name)
+    return printer_name
+
+
+def print_test_ticket_direct(settings: dict) -> str:
+    """Imprime un ticket de prueba de 48 columnas para verificar ancho completo y corte."""
+    cols = get_cols(settings)
+    ESC = b"\x1b"
+    GS = b"\x1d"
+    buf = bytearray()
+    buf += ESC + b"@" + ESC + b"M\x00" + GS + b"L\x00\x00" + GS + b"W\x40\x02"
+    buf += ESC + b"a\x01" + ESC + b"E\x01" + GS + b"!\x11"
+    buf += b"PRUEBA TICKETERA\n"
+    buf += GS + b"!\x00" + ESC + b"E\x00"
+    buf += (("=" * cols) + "\n").encode("ascii")
+    buf += (f"ANCHO COMPLETO CONFIGURADO ({cols} COLUMNAS)\n").encode("ascii")
+    buf += (("1234567890" * 5)[:cols] + "\n").encode("ascii")
+    buf += (("=" * cols) + "\n\n").encode("ascii")
+    buf += GS + b"V\x41\x03"
+
+    printer_name = settings.get("printer_name", "").strip() or detect_preferred_thermal_printer()
+    send_to_windows_printer(bytes(buf), printer_name)
+    return printer_name
+
+
 def list_windows_printers() -> list:
     try:
         res = subprocess.run(

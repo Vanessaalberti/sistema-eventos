@@ -16,6 +16,7 @@ build/
 *.sqlite
 *.sqlite3
 tickets_emitidos/
+data/
 
 # Sistema e IDE
 .DS_Store
