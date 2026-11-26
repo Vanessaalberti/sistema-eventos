@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -120,6 +121,12 @@ namespace EventosPos
         private int _editingGroupId = 1;
         private OrderRecord _lastCreatedOrder;
 
+        // Modo Multi-Caja (local por PC: "principal" o "secundaria")
+        private bool _isSecondaryMode = false;
+        private string _primaryCajaIp = "";
+        private string _registerName = "Caja Principal";
+        private readonly string _cajaModeConfigPath = Path.Combine(PosStore.DataDir, "caja_mode.txt");
+
         // Controles del Shell
         private ColumnDefinition _sidebarCol;
         private TextBlock _brandTitle;
@@ -127,12 +134,14 @@ namespace EventosPos
         private TextBlock _sbSessionStatus;
         private TextBlock _sbSessionTotal;
         private readonly Dictionary<string, Border> _navButtons = new Dictionary<string, Border>();
-        private readonly Dictionary<string, TextBlock> _navIcons = new Dictionary<string, TextBlock>();
+        private readonly Dictionary<string, ContentControl> _navIconHosts = new Dictionary<string, ContentControl>();
+        private readonly Dictionary<string, string> _navIconNames = new Dictionary<string, string>();
         private readonly Dictionary<string, TextBlock> _navLabels = new Dictionary<string, TextBlock>();
 
         // Barra superior
         private TextBlock _headerEventLabel;
         private TextBlock _headerSubLabel;
+        private TextBlock _lanBadgeText;
         private TextBlock _kitchenBadgeText;
         private TextBlock _nextTicketText;
 
@@ -182,6 +191,10 @@ namespace EventosPos
         private CheckBox _doubleTicketCheck;
         private StackPanel _kitchenPrinterPanel;
         private ComboBox _kitchenPrinterCombo;
+        private CheckBox _chkEnableBarSep;
+        private StackPanel _barSepPanel;
+        private ComboBox _barPrinterCombo;
+        private ComboBox _barCopiesCombo;
         private CheckBox _chkEnableCash;
         private CheckBox _chkEnableTransfer;
         private CheckBox _chkEnableCard;
@@ -190,12 +203,17 @@ namespace EventosPos
         private Border _logoPreviewBox;
         private TextBox _mpAliasSettingBox;
         private TextBox _footerSettingBox;
+        private ComboBox _cajaModeCombo;
+        private StackPanel _secondaryIpPanel;
+        private TextBox _primaryIpBox;
+        private TextBox _registerNameBox;
 
         private DispatcherTimer _syncTimer;
 
         public CajaMainWindow()
         {
-            _db = PosStore.Load();
+            LoadLocalCajaModeConfig();
+            _db = LoadCurrentDatabase();
             var activeSess = PosStore.GetActiveSession(_db);
             _editingGroupId = activeSess != null ? activeSess.MenuGroupId : _db.Settings.ActiveMenuGroupId;
 
@@ -215,16 +233,54 @@ namespace EventosPos
             PreviewKeyDown += OnWindowKeyDown;
             Closed += (s, e) => PosNetworkSync.StopCajaServer();
 
-            PosNetworkSync.StartCajaServer();
+            if (!_isSecondaryMode)
+                PosNetworkSync.StartCajaServer();
 
             BuildShellLayout();
             RefreshAllUI();
 
-            _syncTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            _syncTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1800) };
             _syncTimer.Tick += (s, e) => BackgroundSync();
             _syncTimer.Start();
 
             Loaded += (s, e) => GitHubUpdater.CheckForUpdatesAsync(this, "Caja_POS.exe", false);
+        }
+
+        private void LoadLocalCajaModeConfig()
+        {
+            try
+            {
+                Directory.CreateDirectory(PosStore.DataDir);
+                if (File.Exists(_cajaModeConfigPath))
+                {
+                    string[] parts = File.ReadAllText(_cajaModeConfigPath, System.Text.Encoding.UTF8).Trim().Split('|');
+                    if (parts.Length >= 2 && parts[0] == "secundaria" && !string.IsNullOrWhiteSpace(parts[1]))
+                    {
+                        _isSecondaryMode = true;
+                        _primaryCajaIp = parts[1].Trim();
+                        _registerName = parts.Length >= 3 && !string.IsNullOrWhiteSpace(parts[2]) ? parts[2].Trim() : "Caja 2";
+                        return;
+                    }
+                }
+            }
+            catch { }
+            _isSecondaryMode = false;
+            _primaryCajaIp = "";
+            _registerName = "Caja Principal";
+        }
+
+        private PosDatabasePayload LoadCurrentDatabase()
+        {
+            if (_isSecondaryMode && !string.IsNullOrWhiteSpace(_primaryCajaIp))
+            {
+                try
+                {
+                    var remoteDb = PosNetworkSync.FetchStateFromCajaIp(_primaryCajaIp);
+                    if (remoteDb != null) return remoteDb;
+                }
+                catch { }
+            }
+            return PosStore.Load();
         }
 
         private void OnWindowKeyDown(object sender, KeyEventArgs e)
@@ -269,15 +325,7 @@ namespace EventosPos
                 Cursor = Cursors.Hand,
                 ToolTip = "Desplegar / Contraer menú lateral"
             };
-            logoSquare.Child = new TextBlock
-            {
-                Text = "☰",
-                FontSize = 17,
-                FontWeight = FontWeights.Bold,
-                Foreground = Brushes.White,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
+            logoSquare.Child = LucideIcons.Create("menu", 19, Brushes.White, 2.2);
             logoSquare.MouseLeftButtonUp += (s, e) => ToggleSidebar();
             DockPanel.SetDock(logoSquare, Dock.Left);
             sbHeader.Children.Add(logoSquare);
@@ -322,7 +370,7 @@ namespace EventosPos
                 Foreground = Theme.Text,
                 Margin = new Thickness(0, 3, 0, 8)
             };
-            var btnGoToPos = CreatePrimaryButton("🛒 Tomar Pedido", () => SwitchSection("pos"), true);
+            var btnGoToPos = CreatePrimaryButton("Tomar Pedido", () => SwitchSection("pos"), true, "shopping-cart");
             scStack.Children.Add(_sbSessionStatus);
             scStack.Children.Add(_sbSessionTotal);
             scStack.Children.Add(btnGoToPos);
@@ -330,13 +378,13 @@ namespace EventosPos
             _sidebarFooter.Children.Add(statusCard);
             sbDock.Children.Add(_sidebarFooter);
 
-            // Navegación Lateral
+            // Navegación Lateral con íconos Lucide vectoriales
             var navStack = new StackPanel { Margin = new Thickness(12, 0, 12, 0) };
-            AddNavItem(navStack, "caja_actual", "🏠", "Caja Actual");
-            AddNavItem(navStack, "pos", "🛒", "Tomar Pedido");
-            AddNavItem(navStack, "menu", "🍽️", "Menú");
-            AddNavItem(navStack, "orders", "🧾", "Tickets");
-            AddNavItem(navStack, "settings", "⚙️", "Ajustes");
+            AddNavItem(navStack, "caja_actual", "store", "Caja Actual");
+            AddNavItem(navStack, "pos", "shopping-cart", "Tomar Pedido");
+            AddNavItem(navStack, "menu", "utensils", "Menú");
+            AddNavItem(navStack, "orders", "receipt", "Tickets");
+            AddNavItem(navStack, "settings", "settings", "Ajustes");
             sbDock.Children.Add(navStack);
 
             sidebarBorder.Child = sbDock;
@@ -393,15 +441,22 @@ namespace EventosPos
                 CornerRadius = Theme.BtnRadius,
                 Padding = new Thickness(10, 6, 10, 6),
                 Margin = new Thickness(0, 0, 8, 0),
-                ToolTip = "IP local de esta PC para conectar Cocina_POS.exe desde otra computadora"
+                ToolTip = "IP local de esta PC o conexión Multi-Caja"
             };
-            lanBadge.Child = new TextBlock
+            var lanRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            var wifiIc = (FrameworkElement)LucideIcons.Create(_isSecondaryMode ? "link" : "wifi", 14, Theme.Muted);
+            wifiIc.Margin = new Thickness(0, 0, 6, 0);
+            lanRow.Children.Add(wifiIc);
+            _lanBadgeText = new TextBlock
             {
-                Text = "📡 IP: " + PosNetworkSync.GetLocalLanIp(),
+                Text = _isSecondaryMode ? (_registerName + " → " + _primaryCajaIp) : ("IP: " + PosNetworkSync.GetLocalLanIp()),
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
-                Foreground = Theme.Muted
+                Foreground = Theme.Muted,
+                VerticalAlignment = VerticalAlignment.Center
             };
+            lanRow.Children.Add(_lanBadgeText);
+            lanBadge.Child = lanRow;
             rightBadges.Children.Add(lanBadge);
 
             var kitchenBadge = new Border
@@ -413,14 +468,20 @@ namespace EventosPos
                 Padding = new Thickness(10, 6, 10, 6),
                 Margin = new Thickness(0, 0, 8, 0)
             };
+            var kRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            var chefIc = (FrameworkElement)LucideIcons.Create("chef-hat", 14, Theme.Warn);
+            chefIc.Margin = new Thickness(0, 0, 6, 0);
+            kRow.Children.Add(chefIc);
             _kitchenBadgeText = new TextBlock
             {
-                Text = "👨‍🍳 Cocina: 0",
+                Text = "Cocina: 0",
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
-                Foreground = Theme.Warn
+                Foreground = Theme.Warn,
+                VerticalAlignment = VerticalAlignment.Center
             };
-            kitchenBadge.Child = _kitchenBadgeText;
+            kRow.Children.Add(_kitchenBadgeText);
+            kitchenBadge.Child = kRow;
             rightBadges.Children.Add(kitchenBadge);
 
             var nextTicketBadge = new Border
@@ -492,15 +553,7 @@ namespace EventosPos
                 VerticalAlignment = VerticalAlignment.Center,
                 ToolTip = "Cerrar notificación"
             };
-            btnCloseToast.Child = new TextBlock
-            {
-                Text = "✕",
-                FontSize = 11,
-                FontWeight = FontWeights.Bold,
-                Foreground = Theme.Muted,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
+            btnCloseToast.Child = LucideIcons.Create("x", 13, Theme.Muted, 2.2);
             btnCloseToast.MouseLeftButtonUp += (s, e) => HideToast();
             DockPanel.SetDock(btnCloseToast, Dock.Right);
             toastDock.Children.Add(btnCloseToast);
@@ -528,7 +581,7 @@ namespace EventosPos
             SwitchSection("caja_actual");
         }
 
-        private void AddNavItem(StackPanel parent, string key, string icon, string label)
+        private void AddNavItem(StackPanel parent, string key, string iconName, string label)
         {
             var border = new Border
             {
@@ -540,12 +593,11 @@ namespace EventosPos
             };
 
             var row = new StackPanel { Orientation = Orientation.Horizontal };
-            var ic = new TextBlock
+            var iconHost = new ContentControl
             {
-                Text = icon,
-                FontSize = 15,
-                Width = 24,
-                TextAlignment = TextAlignment.Center,
+                Width = 22,
+                Height = 22,
+                Content = LucideIcons.Create(iconName, 17, Theme.Muted),
                 VerticalAlignment = VerticalAlignment.Center
             };
             var lbl = new TextBlock
@@ -557,7 +609,7 @@ namespace EventosPos
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(10, 0, 0, 0)
             };
-            row.Children.Add(ic);
+            row.Children.Add(iconHost);
             row.Children.Add(lbl);
             border.Child = row;
 
@@ -572,7 +624,8 @@ namespace EventosPos
             border.MouseLeftButtonUp += (s, e) => SwitchSection(key);
 
             _navButtons[key] = border;
-            _navIcons[key] = ic;
+            _navIconHosts[key] = iconHost;
+            _navIconNames[key] = iconName;
             _navLabels[key] = lbl;
             parent.Children.Add(border);
         }
@@ -598,14 +651,13 @@ namespace EventosPos
             _ordersView.Visibility = key == "orders" ? Visibility.Visible : Visibility.Collapsed;
             _settingsView.Visibility = key == "settings" ? Visibility.Visible : Visibility.Collapsed;
 
-            // Estilo de la referencia: botón activo en azul sólido #3B76F6 con texto blanco
             foreach (var kv in _navButtons)
             {
                 bool active = kv.Key == key;
                 kv.Value.Background = active ? Theme.Brand : Brushes.Transparent;
                 _navLabels[kv.Key].Foreground = active ? Brushes.White : Theme.Muted;
                 _navLabels[kv.Key].FontWeight = active ? FontWeights.Bold : FontWeights.SemiBold;
-                _navIcons[kv.Key].Foreground = active ? Brushes.White : Theme.Muted;
+                _navIconHosts[kv.Key].Content = LucideIcons.Create(_navIconNames[kv.Key], 17, active ? Brushes.White : Theme.Muted);
             }
 
             if (key == "caja_actual") RenderCajaActualView();
@@ -667,300 +719,193 @@ namespace EventosPos
         private void RenderCajaActualView()
         {
             _cajaActualHostStack.Children.Clear();
-            _db = PosStore.Load();
+            _db = LoadCurrentDatabase();
             var activeSess = PosStore.GetActiveSession(_db);
             if (activeSess != null)
                 PosStore.RecalculateSessionMetrics(_db, activeSess);
 
             var activeGroup = GetCurrentActiveGroup();
 
-            var heroCard = new Border
+            if (activeSess == null)
             {
-                Background = Theme.Card,
-                BorderBrush = Theme.Border,
-                BorderThickness = new Thickness(1),
-                CornerRadius = Theme.CardRadius,
-                Padding = new Thickness(22, 18, 22, 18),
-                Margin = new Thickness(0, 0, 0, 14),
-                Effect = Theme.CardShadow()
-            };
+                var closedCard = new Border
+                {
+                    Background = Theme.Card,
+                    BorderBrush = Theme.Border,
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = Theme.CardRadius,
+                    Padding = new Thickness(24, 20, 24, 20),
+                    Margin = new Thickness(0, 0, 0, 16),
+                    Effect = Theme.CardShadow()
+                };
+                var cDock = new DockPanel();
+                var btnOpen = CreatePrimaryButton("Abrir Nueva Caja", OpenNewSessionModal, false, "plus");
+                DockPanel.SetDock(btnOpen, Dock.Right);
+                cDock.Children.Add(btnOpen);
 
-            var heroDock = new DockPanel();
-            var heroActions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            DockPanel.SetDock(heroActions, Dock.Right);
-
-            if (activeSess != null)
-            {
-                var btnGoPos = CreatePrimaryButton("🛒 Ir a Tomar Pedidos", () => SwitchSection("pos"), false);
-                btnGoPos.Margin = new Thickness(0, 0, 8, 0);
-                heroActions.Children.Add(btnGoPos);
+                var cInfo = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+                cInfo.Children.Add(new TextBlock { Text = "Caja Cerrada", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Theme.Text });
+                cInfo.Children.Add(new TextBlock { Text = "Abrí una nueva caja para empezar a cobrar pedidos.", FontSize = 13, Foreground = Theme.Muted, Margin = new Thickness(0, 3, 0, 0) });
+                cDock.Children.Add(cInfo);
+                closedCard.Child = cDock;
+                _cajaActualHostStack.Children.Add(closedCard);
             }
-
-            var btnNewCaja = CreateGhostButton("🔓 Iniciar Nueva Caja / Evento", OpenNewSessionModal);
-            heroActions.Children.Add(btnNewCaja);
-            heroDock.Children.Add(heroActions);
-
-            var heroInfo = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            var statusRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
-
-            var statusBadge = new Border
+            else
             {
-                Background = activeSess != null ? Theme.OkBg : Theme.ErrBg,
-                BorderBrush = activeSess != null ? Theme.Ok : Theme.Err,
-                BorderThickness = new Thickness(1),
-                CornerRadius = Theme.BtnRadius,
-                Padding = new Thickness(10, 3, 10, 3),
-                Margin = new Thickness(0, 0, 8, 0)
-            };
-            statusBadge.Child = new TextBlock
-            {
-                Text = activeSess != null ? string.Format("CAJA #{0:000} ABIERTA", activeSess.Id) : "CAJA CERRADA",
-                FontSize = 11,
-                FontWeight = FontWeights.Bold,
-                Foreground = activeSess != null ? Theme.Ok : Theme.Err
-            };
-            statusRow.Children.Add(statusBadge);
-
-            var groupBadge = new Border
-            {
-                Background = Theme.BrandBg,
-                BorderBrush = Theme.BrandSoft,
-                BorderThickness = new Thickness(1),
-                CornerRadius = Theme.BtnRadius,
-                Padding = new Thickness(10, 3, 10, 3)
-            };
-            groupBadge.Child = new TextBlock
-            {
-                Text = "MENÚ: " + activeGroup.Name.ToUpperInvariant(),
-                FontSize = 11,
-                FontWeight = FontWeights.Bold,
-                Foreground = Theme.Brand
-            };
-            statusRow.Children.Add(groupBadge);
-            heroInfo.Children.Add(statusRow);
-
-            heroInfo.Children.Add(new TextBlock
-            {
-                Text = activeSess != null ? activeSess.EventName : "No hay ninguna caja abierta actualmente",
-                FontSize = 20,
-                FontWeight = FontWeights.Bold,
-                Foreground = Theme.Text
-            });
-
-            heroInfo.Children.Add(new TextBlock
-            {
-                Text = activeSess != null
-                    ? string.Format("Abierta: {0}   ·   Fondo inicial: {1}   ·   Próximo ticket: #{2:000}",
-                        activeSess.OpenedAt, PosStore.FormatMoney(activeSess.OpeningCash), _db.Settings.NextTicketSequence)
-                    : "Iniciá una Nueva Caja para seleccionar el menú del evento y empezar a cobrar.",
-                FontSize = 13,
-                Foreground = Theme.Muted,
-                Margin = new Thickness(0, 3, 0, 0)
-            });
-
-            heroDock.Children.Add(heroInfo);
-            heroCard.Child = heroDock;
-            _cajaActualHostStack.Children.Add(heroCard);
-
-            if (activeSess != null)
-            {
-                // Selector de Menú / Grupo de Evento
-                var switchMenuCard = new Border
-                {
-                    Background = Theme.Card,
-                    BorderBrush = Theme.Border,
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = Theme.CardRadius,
-                    Padding = new Thickness(18, 12, 18, 12),
-                    Margin = new Thickness(0, 0, 0, 14)
-                };
-                var smDock = new DockPanel();
-                var btnEditMenus = CreateGhostButton("🍽️ Administrar Menús por Evento", () => SwitchSection("menu"));
-                DockPanel.SetDock(btnEditMenus, Dock.Right);
-                smDock.Children.Add(btnEditMenus);
-
-                var smLeft = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-                smLeft.Children.Add(new TextBlock
-                {
-                    Text = "Tipo de Evento / Menú de esta Caja:",
-                    FontSize = 13,
-                    FontWeight = FontWeights.SemiBold,
-                    Foreground = Theme.Text,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(0, 0, 10, 0)
-                });
-
-                var grpCombo = new ComboBox { Width = 280, Padding = new Thickness(8, 5, 8, 5), FontSize = 13 };
-                foreach (var g in _db.MenuGroups) grpCombo.Items.Add(g.Name);
-                grpCombo.SelectedItem = activeGroup.Name;
-                grpCombo.SelectionChanged += (s, e) =>
-                {
-                    if (grpCombo.SelectedItem == null) return;
-                    string chosenName = grpCombo.SelectedItem.ToString();
-                    var chosenGrp = _db.MenuGroups.FirstOrDefault(g => g.Name == chosenName);
-                    if (chosenGrp != null && chosenGrp.Id != activeSess.MenuGroupId)
-                    {
-                        activeSess.MenuGroupId = chosenGrp.Id;
-                        activeSess.MenuGroupName = chosenGrp.Name;
-                        _db.Settings.ActiveMenuGroupId = chosenGrp.Id;
-                        PosStore.Save(_db);
-                        _cart.Clear();
-                        RefreshAllUI();
-                        RenderCajaActualView();
-                        ShowToast("Menú activo cambiado a: " + chosenGrp.Name);
-                    }
-                };
-                smLeft.Children.Add(grpCombo);
-                smDock.Children.Add(smLeft);
-                switchMenuCard.Child = smDock;
-                _cajaActualHostStack.Children.Add(switchMenuCard);
-
-                // Métricas
-                bool showCardStat = _db.Settings.EnableCard || activeSess.CardSales > 0;
-                var metricsGrid = new UniformGrid { Columns = showCardStat ? 5 : 4, Margin = new Thickness(0, 0, 0, 14) };
-                metricsGrid.Children.Add(CreateStatCard("TOTAL RECAUDADO", PosStore.FormatMoney(activeSess.TotalSales), Theme.Brand));
-                metricsGrid.Children.Add(CreateStatCard("PEDIDOS COBRADOS", activeSess.OrdersCount.ToString(), Theme.Text));
-                metricsGrid.Children.Add(CreateStatCard("💵 EFECTIVO", PosStore.FormatMoney(activeSess.CashSales), Theme.Ok));
-                metricsGrid.Children.Add(CreateStatCard("📱 TRANSFERENCIA", PosStore.FormatMoney(activeSess.MpSales), Theme.BrandDark));
-                if (showCardStat)
-                    metricsGrid.Children.Add(CreateStatCard("💳 TARJETA", PosStore.FormatMoney(activeSess.CardSales), Theme.Muted));
-                _cajaActualHostStack.Children.Add(metricsGrid);
-
-                // Arqueo + Ranking
-                var splitGrid = new Grid { Margin = new Thickness(0, 0, 0, 16) };
-                splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.1, GridUnitType.Star) });
-                splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
-                splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-                var arqueoCard = new Border
-                {
-                    Background = Theme.Card,
-                    BorderBrush = Theme.Border,
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = Theme.CardRadius,
-                    Padding = new Thickness(18)
-                };
-                var aStack = new StackPanel();
-                aStack.Children.Add(new TextBlock
-                {
-                    Text = "🔐 Arqueo de Efectivo y Cierre de Caja",
-                    FontSize = 15,
-                    FontWeight = FontWeights.Bold,
-                    Foreground = Theme.Text,
-                    Margin = new Thickness(0, 0, 0, 10)
-                });
-
-                aStack.Children.Add(new TextBlock
-                {
-                    Text = string.Format("• Fondo Inicial de Cambio:   {0}\n• (+) Ventas en Efectivo:     {1}\n• (=) EFECTIVO ESPERADO EN CAJÓN:   {2}",
-                        PosStore.FormatMoney(activeSess.OpeningCash),
-                        PosStore.FormatMoney(activeSess.CashSales),
-                        PosStore.FormatMoney(activeSess.ExpectedCash)),
-                    FontSize = 13,
-                    FontWeight = FontWeights.SemiBold,
-                    Foreground = Theme.Text,
-                    LineHeight = 22,
-                    Margin = new Thickness(0, 0, 0, 12)
-                });
-
-                aStack.Children.Add(new TextBlock
-                {
-                    Text = "Efectivo Real Contado en Cajón ($):",
-                    FontSize = 12,
-                    FontWeight = FontWeights.Bold,
-                    Foreground = Theme.Muted,
-                    Margin = new Thickness(0, 0, 0, 4)
-                });
-
-                var countedRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 14) };
-                var countedBox = CreateStyledTextBox();
-                countedBox.Width = 150;
-                countedBox.Text = activeSess.ExpectedCash.ToString("0");
-
-                var diffLabel = new TextBlock
-                {
-                    Text = "✓ Caja Exacta ($0)",
-                    FontSize = 13,
-                    FontWeight = FontWeights.Bold,
-                    Foreground = Theme.Ok,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(12, 0, 0, 0)
-                };
-
-                countedBox.TextChanged += (s, e) =>
-                {
-                    decimal cVal = 0;
-                    decimal.TryParse(countedBox.Text.Trim(), out cVal);
-                    decimal diff = cVal - activeSess.ExpectedCash;
-                    if (Math.Abs(diff) < 1) { diffLabel.Text = "✓ Caja Exacta ($0)"; diffLabel.Foreground = Theme.Ok; }
-                    else if (diff > 0) { diffLabel.Text = "Sobrante: +" + PosStore.FormatMoney(diff); diffLabel.Foreground = Theme.Brand; }
-                    else { diffLabel.Text = "Faltante: " + PosStore.FormatMoney(diff); diffLabel.Foreground = Theme.Err; }
-                };
-
-                countedRow.Children.Add(countedBox);
-                countedRow.Children.Add(diffLabel);
-                aStack.Children.Add(countedRow);
-
                 var sessionOrders = _db.Orders.Where(o => o.SessionId == activeSess.Id).ToList();
 
-                var btnsClosure = new UniformGrid { Columns = 2 };
-                var btnPrintZ = CreateGhostButton("🖨️ Imprimir Reporte (Ticket Z)", () =>
+                // Vista principal simplificada: Izquierda = Recaudación y Cierre, Derecha = Platos Vendidos
+                var splitGrid = new Grid { Margin = new Thickness(0, 0, 0, 18) };
+                splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
+                splitGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+                // TARJETA IZQUIERDA: Recaudación actual y acciones de cierre
+                var recCard = new Border
                 {
-                    decimal cVal = activeSess.ExpectedCash;
-                    decimal.TryParse(countedBox.Text.Trim(), out cVal);
-                    activeSess.CountedCash = cVal;
+                    Background = Theme.Card,
+                    BorderBrush = Theme.Border,
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = Theme.CardRadius,
+                    Padding = new Thickness(22, 20, 22, 20),
+                    Effect = Theme.CardShadow()
+                };
+                var recStack = new StackPanel();
+
+                var topRow = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
+                var statusBadge = new Border
+                {
+                    Background = Theme.OkBg,
+                    BorderBrush = Theme.Ok,
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = Theme.BtnRadius,
+                    Padding = new Thickness(8, 3, 8, 3),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                statusBadge.Child = new TextBlock
+                {
+                    Text = string.Format("CAJA #{0:000} ABIERTA", activeSess.Id),
+                    FontSize = 11,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = Theme.Ok
+                };
+                DockPanel.SetDock(statusBadge, Dock.Right);
+                topRow.Children.Add(statusBadge);
+
+                topRow.Children.Add(new TextBlock
+                {
+                    Text = "Recaudación Actual",
+                    FontSize = 16,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = Theme.Text,
+                    VerticalAlignment = VerticalAlignment.Center
+                });
+                recStack.Children.Add(topRow);
+
+                recStack.Children.Add(new TextBlock
+                {
+                    Text = PosStore.FormatMoney(activeSess.TotalSales),
+                    FontSize = 34,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = Theme.Brand,
+                    Margin = new Thickness(0, 0, 0, 4)
+                });
+                recStack.Children.Add(new TextBlock
+                {
+                    Text = string.Format("{0} pedido(s) cobrado(s)   ·   Menú: {1}", activeSess.OrdersCount, activeGroup.Name),
+                    FontSize = 12,
+                    Foreground = Theme.Muted,
+                    Margin = new Thickness(0, 0, 0, 14)
+                });
+
+                var breakBox = new Border
+                {
+                    Background = Theme.SurfaceSoft,
+                    BorderBrush = Theme.Border,
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = Theme.BtnRadius,
+                    Padding = new Thickness(14, 10, 14, 10),
+                    Margin = new Thickness(0, 0, 0, 16)
+                };
+                var bStack = new StackPanel();
+
+                Action<string, decimal, SolidColorBrush> addLine = (lbl, val, brush) =>
+                {
+                    var d = new DockPanel { Margin = new Thickness(0, 3, 0, 3) };
+                    var v = new TextBlock { Text = PosStore.FormatMoney(val), FontSize = 13, FontWeight = FontWeights.Bold, Foreground = brush };
+                    DockPanel.SetDock(v, Dock.Right);
+                    d.Children.Add(v);
+                    d.Children.Add(new TextBlock { Text = lbl, FontSize = 13, Foreground = Theme.Text });
+                    bStack.Children.Add(d);
+                };
+
+                addLine("Efectivo", activeSess.CashSales, Theme.Ok);
+                addLine("Transferencia", activeSess.MpSales, Theme.BrandDark);
+                if (_db.Settings.EnableCard || activeSess.CardSales > 0)
+                    addLine("Tarjeta", activeSess.CardSales, Theme.Text);
+
+                breakBox.Child = bStack;
+                recStack.Children.Add(breakBox);
+
+                var actRow = new UniformGrid { Columns = 3 };
+                var btnPrintZ = CreateGhostButton("Imprimir", () =>
+                {
                     try
                     {
                         EscPosPrinter.PrintCashClosure(activeSess, sessionOrders, _db.Settings);
-                        ShowToast("🖨️ Reporte de Arqueo impreso en " + _db.Settings.PrinterName);
+                        ShowToast("Reporte impreso en " + _db.Settings.PrinterName);
                     }
                     catch (Exception ex) { MessageBox.Show(ex.Message, "Error al imprimir", MessageBoxButton.OK, MessageBoxImage.Error); }
-                });
+                }, "printer");
                 btnPrintZ.Margin = new Thickness(0, 0, 6, 0);
-                btnsClosure.Children.Add(btnPrintZ);
+                actRow.Children.Add(btnPrintZ);
 
-                var btnCloseRegister = CreatePrimaryButton("🔒 CERRAR CAJA ACTUAL", () =>
+                var btnExportCur = CreateGhostButton("Exportar Excel", () => ExportSessionClosureCsv(activeSess, sessionOrders), "file-text");
+                btnExportCur.Margin = new Thickness(0, 0, 6, 0);
+                actRow.Children.Add(btnExportCur);
+
+                var btnCloseRegister = CreatePrimaryButton("Cerrar Caja", () =>
                 {
-                    if (MessageBox.Show("¿Querés CERRAR formalmente la caja actual e imprimir el Ticket Z de Cierre?",
+                    if (MessageBox.Show("¿Querés CERRAR la caja actual e imprimir el Ticket Z de Cierre?",
                         "Confirmar Cierre de Caja", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
                     {
-                        decimal cVal = activeSess.ExpectedCash;
-                        decimal.TryParse(countedBox.Text.Trim(), out cVal);
-                        activeSess.CountedCash = cVal;
-                        activeSess.Difference = cVal - activeSess.ExpectedCash;
+                        activeSess.CountedCash = activeSess.ExpectedCash;
+                        activeSess.Difference = 0;
                         activeSess.ClosedAt = DateTime.Now.ToString("dd/MM/yyyy HH:mm");
                         activeSess.Status = "cerrada";
                         PosStore.Save(_db);
                         try { EscPosPrinter.PrintCashClosure(activeSess, sessionOrders, _db.Settings); } catch { }
                         RefreshAllUI();
                         RenderCajaActualView();
-                        ShowToast(string.Format("🔒 Caja #{0:000} cerrada correctamente.", activeSess.Id));
+                        ShowToast(string.Format("Caja #{0:000} cerrada correctamente.", activeSess.Id));
                     }
                 }, false);
                 btnCloseRegister.Background = Theme.Err;
-                btnsClosure.Children.Add(btnCloseRegister);
+                actRow.Children.Add(btnCloseRegister);
 
-                aStack.Children.Add(btnsClosure);
-                arqueoCard.Child = aStack;
-                Grid.SetColumn(arqueoCard, 0);
-                splitGrid.Children.Add(arqueoCard);
+                recStack.Children.Add(actRow);
+                recCard.Child = recStack;
+                Grid.SetColumn(recCard, 0);
+                splitGrid.Children.Add(recCard);
 
+                // TARJETA DERECHA: Platos Vendidos en esta Caja
                 var rankCard = new Border
                 {
                     Background = Theme.Card,
                     BorderBrush = Theme.Border,
                     BorderThickness = new Thickness(1),
                     CornerRadius = Theme.CardRadius,
-                    Padding = new Thickness(18)
+                    Padding = new Thickness(22, 20, 22, 20),
+                    Effect = Theme.CardShadow()
                 };
                 var rStack = new StackPanel();
                 rStack.Children.Add(new TextBlock
                 {
-                    Text = "📊 Platos Vendidos en esta Caja",
-                    FontSize = 15,
+                    Text = "Platos Vendidos en esta Caja",
+                    FontSize = 16,
                     FontWeight = FontWeights.Bold,
                     Foreground = Theme.Text,
-                    Margin = new Thickness(0, 0, 0, 10)
+                    Margin = new Thickness(0, 0, 0, 12)
                 });
 
                 var ranking = sessionOrders
@@ -973,17 +918,17 @@ namespace EventosPos
 
                 if (ranking.Count == 0)
                 {
-                    rStack.Children.Add(new TextBlock { Text = "Aún no hay ventas registradas en esta caja.", Foreground = Theme.Muted, FontSize = 12 });
+                    rStack.Children.Add(new TextBlock { Text = "Aún no hay ventas registradas en esta caja.", Foreground = Theme.Muted, FontSize = 13 });
                 }
                 else
                 {
                     foreach (var r in ranking)
                     {
-                        var rLine = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-                        var amtTxt = new TextBlock { Text = PosStore.FormatMoney(r.Amt), FontWeight = FontWeights.Bold, Foreground = Theme.Brand };
+                        var rLine = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
+                        var amtTxt = new TextBlock { Text = PosStore.FormatMoney(r.Amt), FontSize = 13, FontWeight = FontWeights.Bold, Foreground = Theme.Brand };
                         DockPanel.SetDock(amtTxt, Dock.Right);
                         rLine.Children.Add(amtTxt);
-                        rLine.Children.Add(new TextBlock { Text = r.Qty + "x  " + r.Name, FontWeight = FontWeights.SemiBold, Foreground = Theme.Text });
+                        rLine.Children.Add(new TextBlock { Text = r.Qty + "x  " + r.Name, FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = Theme.Text });
                         rStack.Children.Add(rLine);
                     }
                 }
@@ -1019,18 +964,31 @@ namespace EventosPos
                     };
                     var csDock = new DockPanel();
                     var csCopy = cs;
-                    var btnRep = CreateGhostButton("🖨️ Reimprimir Cierre", () =>
+
+                    var csBtns = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                    DockPanel.SetDock(csBtns, Dock.Right);
+
+                    var btnExp = CreateGhostButton("Exportar Cierre", () =>
+                    {
+                        var sOrders = _db.Orders.Where(o => o.SessionId == csCopy.Id).ToList();
+                        ExportSessionClosureCsv(csCopy, sOrders);
+                    }, "file-text");
+                    btnExp.Margin = new Thickness(0, 0, 6, 0);
+                    csBtns.Children.Add(btnExp);
+
+                    var btnRep = CreateGhostButton("Reimprimir Cierre", () =>
                     {
                         var sOrders = _db.Orders.Where(o => o.SessionId == csCopy.Id).ToList();
                         try
                         {
                             EscPosPrinter.PrintCashClosure(csCopy, sOrders, _db.Settings);
-                            ShowToast("🖨️ Cierre de Caja #" + csCopy.Id.ToString("000") + " reimpreso.");
+                            ShowToast("Cierre de Caja #" + csCopy.Id.ToString("000") + " reimpreso.");
                         }
                         catch (Exception ex) { MessageBox.Show(ex.Message, "Error al imprimir", MessageBoxButton.OK, MessageBoxImage.Error); }
-                    });
-                    DockPanel.SetDock(btnRep, Dock.Right);
-                    csDock.Children.Add(btnRep);
+                    }, "printer");
+                    csBtns.Children.Add(btnRep);
+
+                    csDock.Children.Add(csBtns);
 
                     csDock.Children.Add(new TextBlock
                     {
@@ -1047,11 +1005,70 @@ namespace EventosPos
             }
         }
 
+        private void ExportSessionClosureCsv(CashSession sess, List<OrderRecord> sessionOrders)
+        {
+            try
+            {
+                var dlg = new SaveFileDialog
+                {
+                    Title = "Exportar Cierre de Caja a Excel (.csv)",
+                    Filter = "Planilla Excel (*.csv)|*.csv",
+                    FileName = string.Format("Cierre_Caja_{0:000}_{1}.csv", sess.Id, DateTime.Now.ToString("yyyyMMdd_HHmm"))
+                };
+                if (dlg.ShowDialog(this) != true) return;
+
+                Func<string, string> esc = s => "\"" + (s ?? "").Replace("\"", "\"\"") + "\"";
+                var sb = new StringBuilder();
+
+                sb.AppendLine("RESUMEN DE CIERRE DE CAJA");
+                sb.AppendLine("Caja;" + esc(string.Format("#{0:000}", sess.Id)));
+                sb.AppendLine("Evento;" + esc(sess.EventName));
+                sb.AppendLine("Menu;" + esc(sess.MenuGroupName ?? "General"));
+                sb.AppendLine("Apertura;" + esc(sess.OpenedAt));
+                sb.AppendLine("Cierre;" + esc(string.IsNullOrWhiteSpace(sess.ClosedAt) ? "En curso" : sess.ClosedAt));
+                sb.AppendLine("Pedidos Cobrados;" + sess.OrdersCount);
+                sb.AppendLine("Efectivo;" + sess.CashSales.ToString("0.##"));
+                sb.AppendLine("Transferencia;" + sess.MpSales.ToString("0.##"));
+                sb.AppendLine("Tarjeta;" + sess.CardSales.ToString("0.##"));
+                sb.AppendLine("TOTAL RECAUDADO;" + sess.TotalSales.ToString("0.##"));
+                sb.AppendLine();
+
+                sb.AppendLine("PLATOS VENDIDOS");
+                sb.AppendLine("Producto;Cantidad;Subtotal");
+                var ranking = sessionOrders
+                    .Where(o => o.Status == "completado")
+                    .SelectMany(o => o.Items)
+                    .GroupBy(i => i.ProductName)
+                    .Select(g => new { Name = g.Key, Qty = g.Sum(x => x.Quantity), Amt = g.Sum(x => x.Subtotal) })
+                    .OrderByDescending(x => x.Qty)
+                    .ToList();
+                foreach (var r in ranking)
+                    sb.AppendLine(string.Format("{0};{1};{2}", esc(r.Name), r.Qty, r.Amt.ToString("0.##")));
+                sb.AppendLine();
+
+                sb.AppendLine("DETALLE DE TICKETS");
+                sb.AppendLine("Ticket;Fecha y Hora;Medio de Pago;Estado;Total;Detalle");
+                foreach (var o in sessionOrders.OrderBy(x => x.Id))
+                {
+                    string det = string.Join(", ", o.Items.Select(i => i.Quantity + "x " + i.ProductName));
+                    sb.AppendLine(string.Format("#{0:000};{1};{2};{3};{4};{5}",
+                        o.TicketNumber, esc(o.CreatedAt), esc(o.PaymentMethod), esc(o.Status), o.Total.ToString("0.##"), esc(det)));
+                }
+
+                File.WriteAllText(dlg.FileName, sb.ToString(), new UTF8Encoding(true));
+                ShowToast("Cierre exportado para Excel: " + Path.GetFileName(dlg.FileName));
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("No se pudo exportar el cierre: " + ex.Message, "Exportar Cierre", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
         // =====================================================================
         // VISTA 2: TOMAR PEDIDO (ESTÉTICA VISUAL DE LA REFERENCIA EN ESPAÑOL)
         // - Tarjetas de categoría con icono y cantidad
         // - Tarjetas horizontales de plato con foto a la izquierda y stepper - 0 +
-        // - Panel derecho "Pedido Actual" con miniaturas, lápiz ✏️ para comentario
+        // - Panel derecho "Pedido Actual" con miniaturas, lápiz para comentario
         //   por artículo y Resumen de Pago limpio
         // =====================================================================
         private UIElement BuildPosView()
@@ -1080,14 +1097,9 @@ namespace EventosPos
                 Effect = Theme.CardShadow()
             };
             var posSearchDock = new DockPanel();
-            posSearchDock.Children.Add(new TextBlock
-            {
-                Text = "🔍",
-                FontSize = 13,
-                Foreground = Theme.Faint,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 8, 0)
-            });
+            var searchIc = (FrameworkElement)LucideIcons.Create("search", 15, Theme.Faint);
+            searchIc.Margin = new Thickness(0, 0, 8, 0);
+            posSearchDock.Children.Add(searchIc);
             var posSearchInput = new TextBox
             {
                 BorderThickness = new Thickness(0),
@@ -1337,7 +1349,7 @@ namespace EventosPos
 
             cartDock.Children.Add(checkoutStack);
 
-            // Lista central de artículos en el pedido (con foto, comentario y lápiz ✏️)
+            // Lista central de artículos en el pedido (con foto, comentario y lápiz )
             var cartScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
             _cartListPanel = new StackPanel();
             cartScroll.Content = _cartListPanel;
@@ -1350,16 +1362,16 @@ namespace EventosPos
             return grid;
         }
 
-        private string GetCategoryIcon(string cat)
+        private string GetCategoryLucideIcon(string cat)
         {
             string low = (cat ?? "").ToLowerInvariant();
-            if (low.Contains("todos")) return "📋";
-            if (low.Contains("almuerzo")) return "🍽️";
-            if (low.Contains("principal") || low.Contains("comida")) return "🍕";
-            if (low.Contains("bebida") || low.Contains("barra")) return "🥤";
-            if (low.Contains("llevar")) return "🥡";
-            if (low.Contains("postre") || low.Contains("dulce")) return "🍰";
-            return "🍴";
+            if (low.Contains("todos")) return "layout-grid";
+            if (low.Contains("almuerzo")) return "utensils";
+            if (low.Contains("empanada") || low.Contains("principal") || low.Contains("comida")) return "utensils";
+            if (low.Contains("bebida") || low.Contains("barra") || low.Contains("cafe")) return "coffee";
+            if (low.Contains("llevar")) return "shopping-bag";
+            if (low.Contains("postre") || low.Contains("dulce")) return "cake";
+            return "utensils";
         }
 
         private void RenderCategoryCards()
@@ -1403,13 +1415,7 @@ namespace EventosPos
                     Background = active ? Brushes.White : Theme.Bg,
                     Margin = new Thickness(0, 0, 10, 0)
                 };
-                iconBox.Child = new TextBlock
-                {
-                    Text = GetCategoryIcon(cat),
-                    FontSize = 16,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center
-                };
+                iconBox.Child = LucideIcons.Create(GetCategoryLucideIcon(cat), 18, active ? Theme.Brand : Theme.Muted);
                 row.Children.Add(iconBox);
 
                 var txtStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
@@ -1515,7 +1521,7 @@ namespace EventosPos
                 }
                 else
                 {
-                    imgHost.Child = new TextBlock { Text = "🍽️", FontSize = 24, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+                    imgHost.Child = LucideIcons.Create(GetCategoryLucideIcon(prod.Category), 24, Theme.Faint);
                 }
                 DockPanel.SetDock(imgHost, Dock.Left);
                 topDock.Children.Add(imgHost);
@@ -1641,7 +1647,7 @@ namespace EventosPos
         }
 
         // =====================================================================
-        // CARRITO DERECHO CON LÁPIZ ✏️ Y SELECTOR DE SABORES (DOCENA / MEDIA)
+        // CARRITO DERECHO CON LÁPIZ Y SELECTOR DE SABORES (DOCENA / MEDIA)
         // =====================================================================
         private int GetReservedQtyInCart(int productId, CartEntry excludeEntry = null)
         {
@@ -1747,7 +1753,7 @@ namespace EventosPos
             if (flavorProducts.Count == 0)
             {
                 MessageBox.Show(
-                    string.Format("No hay productos individuales cargados en la categoría '{0}' dentro de este menú.\n\nAndá a '🍽️ Menú' y creá los sabores individuales dentro de la categoría '{0}'.", filter),
+                    string.Format("No hay productos individuales cargados en la categoría '{0}' dentro de este menú.\n\nAndá a 'Menú' y creá los sabores individuales dentro de la categoría '{0}'.", filter),
                     "Categoría sin productos",
                     MessageBoxButton.OK,
                     MessageBoxImage.Warning);
@@ -1787,7 +1793,7 @@ namespace EventosPos
 
             topStack.Children.Add(new TextBlock
             {
-                Text = "🥟 " + packProd.Name + " (" + requiredQty + " unidades)",
+                Text = "" + packProd.Name + " (" + requiredQty + " unidades)",
                 FontSize = 18,
                 FontWeight = FontWeights.Bold,
                 Foreground = Theme.Text
@@ -1844,7 +1850,7 @@ namespace EventosPos
             Border btnConfirm = null;
             Action refreshFlavorRows = null;
 
-            btnConfirm = CreatePrimaryButton("✓ Confirmar Sabores", () =>
+            btnConfirm = CreatePrimaryButton("Confirmar Sabores", () =>
             {
                 int totalSel = selectedCounts.Values.Sum();
                 int remaining = requiredQty - totalSel;
@@ -1916,7 +1922,7 @@ namespace EventosPos
                     statusBanner.BorderBrush = Theme.Ok;
                     lblSelected.Foreground = Theme.Ok;
                     lblRemaining.Foreground = Theme.Ok;
-                    lblSelected.Text = string.Format("✓ ¡Completo! {0} / {1}", totalSel, requiredQty);
+                    lblSelected.Text = string.Format("¡Completo! {0} / {1}", totalSel, requiredQty);
                     lblRemaining.Text = "Restante: 0";
                 }
                 else
@@ -1997,7 +2003,9 @@ namespace EventosPos
                     {
                         bPlus.Background = Theme.Brand;
                         bPlus.BorderBrush = Theme.Brand;
-                        ((TextBlock)bPlus.Child).Foreground = Brushes.White;
+                        bPlus.Child = LucideIcons.Create("plus", 15, Brushes.White);
+                        bPlus.MouseEnter += (s, e) => bPlus.Background = Theme.BrandDark;
+                        bPlus.MouseLeave += (s, e) => bPlus.Background = Theme.Brand;
                     }
 
                     var bPlus3 = CreateGhostButton("+3", () =>
@@ -2054,7 +2062,7 @@ namespace EventosPos
             {
                 _cartListPanel.Children.Add(new TextBlock
                 {
-                    Text = "Tocá cualquier plato del menú para agregarlo al pedido.\nLuego podés hacer clic en el lápiz ✏️ para agregarle un comentario.",
+                    Text = "Tocá cualquier plato del menú para agregarlo al pedido.\nLuego podés hacer clic en el lápiz para agregarle un comentario.",
                     FontSize = 12,
                     Foreground = Theme.Faint,
                     TextWrapping = TextWrapping.Wrap,
@@ -2074,7 +2082,7 @@ namespace EventosPos
                         BorderThickness = new Thickness(0, 0, 0, 1),
                         Padding = new Thickness(4, 10, 4, 10),
                         Cursor = Cursors.Hand,
-                        ToolTip = "Hacé clic o tocá el lápiz ✏️ para agregar o editar un comentario en este artículo"
+                        ToolTip = "Hacé clic o tocá el lápiz para agregar o editar un comentario en este artículo"
                     };
 
                     rowBorder.MouseEnter += (s, e) => rowBorder.Background = Theme.SurfaceSoft;
@@ -2082,7 +2090,7 @@ namespace EventosPos
 
                     var dock = new DockPanel();
 
-                    // Derecha: Subtotal + Botón Lápiz ✏️ para comentario del artículo
+                    // Derecha: Subtotal + Botón Lápiz para comentario del artículo
                     var rightBox = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) };
                     DockPanel.SetDock(rightBox, Dock.Right);
 
@@ -2098,13 +2106,7 @@ namespace EventosPos
                         ToolTip = "Agregar o editar comentario para este plato (sale en ticket y cocina)",
                         Cursor = Cursors.Hand
                     };
-                    btnPencil.Child = new TextBlock
-                    {
-                        Text = "✏️",
-                        FontSize = 13,
-                        HorizontalAlignment = HorizontalAlignment.Center,
-                        VerticalAlignment = VerticalAlignment.Center
-                    };
+                    btnPencil.Child = LucideIcons.Create("pencil", 14, !string.IsNullOrWhiteSpace(entry.Note) ? Theme.Brand : Theme.Muted);
                     btnPencil.MouseLeftButtonUp += (s, e) =>
                     {
                         e.Handled = true;
@@ -2138,7 +2140,7 @@ namespace EventosPos
                     if (bmp != null)
                         thumb.Child = new Image { Source = bmp, Stretch = Stretch.UniformToFill };
                     else
-                        thumb.Child = new TextBlock { Text = "🍽️", FontSize = 18, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+                        thumb.Child = LucideIcons.Create(GetCategoryLucideIcon(entry.Product.Category), 18, Theme.Faint);
                     DockPanel.SetDock(thumb, Dock.Left);
                     dock.Children.Add(thumb);
 
@@ -2164,7 +2166,7 @@ namespace EventosPos
                         string flavorsSummary = string.Join(", ", entry.PackChoices.Select(pc => pc.Quantity + "x " + pc.ProductName.Replace("Empanada de ", "").Replace("Empanada ", "")));
                         centerStack.Children.Add(new TextBlock
                         {
-                            Text = "🥟 " + flavorsSummary,
+                            Text = "" + flavorsSummary,
                             FontSize = 11,
                             FontWeight = FontWeights.SemiBold,
                             Foreground = Theme.Text,
@@ -2176,7 +2178,7 @@ namespace EventosPos
                     bool hasNote = !string.IsNullOrWhiteSpace(entry.Note);
                     centerStack.Children.Add(new TextBlock
                     {
-                        Text = hasNote ? ("📝 " + entry.Note) : "+ Agregar comentario (✏️)",
+                        Text = hasNote ? entry.Note : "+ Agregar comentario",
                         FontSize = 11,
                         FontWeight = hasNote ? FontWeights.SemiBold : FontWeights.Normal,
                         Foreground = hasNote ? Theme.Brand : Theme.Faint,
@@ -2212,7 +2214,7 @@ namespace EventosPos
             var stack = new StackPanel { Margin = new Thickness(22) };
             stack.Children.Add(new TextBlock
             {
-                Text = "✏️ Comentario para: " + entry.Product.Name,
+                Text = "Comentario para: " + entry.Product.Name,
                 FontSize = 16,
                 FontWeight = FontWeights.Bold,
                 Foreground = Theme.Text,
@@ -2281,7 +2283,7 @@ namespace EventosPos
 
             if (entry.Product.PackRequiredQty > 0)
             {
-                var btnFlavors = CreateGhostButton("🥟 Sabores", () =>
+                var btnFlavors = CreateGhostButton("Sabores", () =>
                 {
                     win.Close();
                     OpenPackFlavorSelectorModal(entry.Product, entry);
@@ -2290,7 +2292,7 @@ namespace EventosPos
                 btnsRow.Children.Add(btnFlavors);
             }
 
-            var btnSave = CreatePrimaryButton("✓ Guardar", () =>
+            var btnSave = CreatePrimaryButton("Guardar", () =>
             {
                 entry.Note = noteInput.Text.Trim();
                 RenderCart();
@@ -2311,10 +2313,10 @@ namespace EventosPos
             _payMethodCards.Clear();
 
             var enabledMethods = new List<Tuple<string, string>>();
-            if (_db.Settings.EnableCash) enabledMethods.Add(Tuple.Create("Efectivo", "💵"));
-            if (_db.Settings.EnableTransfer) enabledMethods.Add(Tuple.Create("Transferencia", "📱"));
-            if (_db.Settings.EnableCard) enabledMethods.Add(Tuple.Create("Tarjeta", "💳"));
-            if (enabledMethods.Count == 0) enabledMethods.Add(Tuple.Create("Efectivo", "💵"));
+            if (_db.Settings.EnableCash) enabledMethods.Add(Tuple.Create("Efectivo", "banknote"));
+            if (_db.Settings.EnableTransfer) enabledMethods.Add(Tuple.Create("Transferencia", "smartphone"));
+            if (_db.Settings.EnableCard) enabledMethods.Add(Tuple.Create("Tarjeta", "credit-card"));
+            if (enabledMethods.Count == 0) enabledMethods.Add(Tuple.Create("Efectivo", "banknote"));
 
             _payMethodsGrid.Columns = enabledMethods.Count;
 
@@ -2325,11 +2327,12 @@ namespace EventosPos
                     CornerRadius = Theme.BtnRadius,
                     Padding = new Thickness(6, 8, 6, 8),
                     Margin = new Thickness(2),
-                    Cursor = Cursors.Hand
+                    Cursor = Cursors.Hand,
+                    Tag = pm.Item2
                 };
                 var pStack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
-                pStack.Children.Add(new TextBlock { Text = pm.Item2, FontSize = 15, HorizontalAlignment = HorizontalAlignment.Center });
-                pStack.Children.Add(new TextBlock { Text = pm.Item1, FontSize = 11, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 2, 0, 0) });
+                pStack.Children.Add(new ContentControl { Content = LucideIcons.Create(pm.Item2, 17, Theme.Muted), HorizontalAlignment = HorizontalAlignment.Center });
+                pStack.Children.Add(new TextBlock { Text = pm.Item1, FontSize = 11, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 3, 0, 0) });
                 pCard.Child = pStack;
 
                 string methodCopy = pm.Item1;
@@ -2353,6 +2356,8 @@ namespace EventosPos
                 kv.Value.Background = active ? Theme.Card : Brushes.Transparent;
                 kv.Value.Effect = active ? Theme.CardShadow() : null;
                 var sp = (StackPanel)kv.Value.Child;
+                string iconKey = (kv.Value.Tag ?? "banknote").ToString();
+                ((ContentControl)sp.Children[0]).Content = LucideIcons.Create(iconKey, 17, active ? Theme.Brand : Theme.Muted);
                 ((TextBlock)sp.Children[1]).Foreground = active ? Theme.Brand : Theme.Muted;
                 ((TextBlock)sp.Children[1]).FontWeight = active ? FontWeights.Bold : FontWeights.SemiBold;
             }
@@ -2398,12 +2403,12 @@ namespace EventosPos
 
         private void SubmitOrder()
         {
-            _db = PosStore.Load();
+            _db = LoadCurrentDatabase();
             var activeSession = PosStore.GetActiveSession(_db);
             if (activeSession == null)
             {
                 MessageBox.Show("La caja actual está cerrada. Iniciá una Nueva Caja para empezar a cobrar.", "Caja Cerrada", MessageBoxButton.OK, MessageBoxImage.Warning);
-                OpenNewSessionModal();
+                if (!_isSecondaryMode) OpenNewSessionModal();
                 return;
             }
 
@@ -2433,31 +2438,20 @@ namespace EventosPos
                 }
             }
 
-            int nextId = _db.Orders.Count == 0 ? 1 : _db.Orders.Max(o => o.Id) + 1;
-            int ticketNum = _db.Settings.NextTicketSequence;
-
-            var newOrder = new OrderRecord
+            var draftOrder = new OrderRecord
             {
-                Id = nextId,
-                SessionId = activeSession.Id,
-                TicketNumber = ticketNum,
-                EventName = activeSession.EventName,
                 Total = total,
                 PaymentMethod = _paymentMethod,
                 AmountReceived = amountReceived,
                 ChangeAmount = changeAmount,
                 Notes = _generalNotesBox.Text.Trim(),
-                Status = "completado",
-                KitchenStatus = "pendiente",
-                KitchenPrinted = false,
-                CreatedAt = DateTime.Now.ToString("dd/MM/yyyy HH:mm"),
-                FinishedAt = "",
-                DeliveredAt = "",
+                RegisterName = _registerName,
                 Items = _cart.Select(c => new OrderLineItem
                 {
                     ProductId = c.Product.Id,
                     ProductName = c.Product.Name,
                     Category = c.Product.Category,
+                    PrepStation = string.IsNullOrWhiteSpace(c.Product.PrepStation) ? "Cocina" : c.Product.PrepStation,
                     Quantity = c.Quantity,
                     UnitPrice = c.Product.Price,
                     Subtotal = c.Subtotal,
@@ -2468,31 +2462,30 @@ namespace EventosPos
                 }).ToList()
             };
 
-            // Descontar stock real (si es Pack/Docena, descuenta el stock de cada sabor elegido)
-            foreach (var line in newOrder.Items)
+            OrderRecord newOrder = null;
+            try
             {
-                if (line.PackChoices != null && line.PackChoices.Count > 0)
+                if (_isSecondaryMode && !string.IsNullOrWhiteSpace(_primaryCajaIp))
                 {
-                    foreach (var pc in line.PackChoices)
-                    {
-                        var flavorProd = _db.Products.FirstOrDefault(x => x.Id == pc.ProductId);
-                        if (flavorProd != null && flavorProd.StockEnabled)
-                            flavorProd.StockQty = Math.Max(0, flavorProd.StockQty - (pc.Quantity * line.Quantity));
-                    }
+                    newOrder = PosNetworkSync.SendCreateOrderToCajaIp(_primaryCajaIp, draftOrder);
                 }
                 else
                 {
-                    var p = _db.Products.FirstOrDefault(x => x.Id == line.ProductId);
-                    if (p != null && p.StockEnabled)
-                        p.StockQty = Math.Max(0, p.StockQty - line.Quantity);
+                    string errMsg;
+                    newOrder = PosNetworkSync.CreateOrderAtomicLocal(draftOrder, out errMsg);
+                    if (newOrder == null)
+                        throw new Exception(errMsg ?? "No se pudo registrar el pedido.");
                 }
             }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "No se pudo cobrar", MessageBoxButton.OK, MessageBoxImage.Warning);
+                _db = LoadCurrentDatabase();
+                RefreshAllUI();
+                return;
+            }
 
-            _db.Orders.Add(newOrder);
-            _db.Settings.NextTicketSequence = ticketNum + 1;
-            PosStore.RecalculateSessionMetrics(_db, activeSession);
-            PosStore.Save(_db);
-
+            _db = LoadCurrentDatabase();
             _lastCreatedOrder = newOrder;
             _cart.Clear();
             _cashInputBox.Text = "";
@@ -2502,12 +2495,12 @@ namespace EventosPos
             try
             {
                 EscPosPrinter.PrintOrder(newOrder, _db.Settings, false);
-                ShowToast(string.Format("✓ Pedido #{0:000} cobrado ({1}) — Ticket impreso en {2} y enviado a Cocina",
+                ShowToast(string.Format("Pedido #{0:000} cobrado ({1}) — Impreso en {2} y enviado a Cocina",
                     newOrder.TicketNumber, PosStore.FormatMoney(newOrder.Total), _db.Settings.PrinterName));
             }
             catch (Exception ex)
             {
-                ShowToast(string.Format("⚠ Pedido #{0:000} enviado a Cocina, pero la ticketera reportó: {1}",
+                ShowToast(string.Format("Pedido #{0:000} enviado a Cocina (Ticketera: {1})",
                     newOrder.TicketNumber, ex.Message), true);
             }
         }
@@ -2518,7 +2511,7 @@ namespace EventosPos
             try
             {
                 EscPosPrinter.PrintOrder(_lastCreatedOrder, _db.Settings, false);
-                ShowToast(string.Format("🖨️ Ticket #{0:000} reimpreso correctamente.", _lastCreatedOrder.TicketNumber));
+                ShowToast(string.Format("Ticket #{0:000} reimpreso correctamente.", _lastCreatedOrder.TicketNumber));
             }
             catch (Exception ex) { MessageBox.Show(ex.Message, "Error al imprimir", MessageBoxButton.OK, MessageBoxImage.Error); }
         }
@@ -2594,7 +2587,7 @@ namespace EventosPos
             var rtButtons = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             DockPanel.SetDock(rtButtons, Dock.Right);
 
-            var btnUseGroupInCaja = CreateGhostButton("✓ Activar en Caja Actual", () =>
+            var btnUseGroupInCaja = CreateGhostButton("Activar en Caja Actual", () =>
             {
                 var grp = _db.MenuGroups.FirstOrDefault(g => g.Id == _editingGroupId);
                 if (grp == null) return;
@@ -2609,7 +2602,7 @@ namespace EventosPos
                 _cart.Clear();
                 RefreshAllUI();
                 RenderMenuSection();
-                ShowToast("✓ Menú '" + grp.Name + "' activado en la Caja Actual.");
+                ShowToast("Menú '" + grp.Name + "' activado en la Caja Actual.");
             });
             btnUseGroupInCaja.Margin = new Thickness(0, 0, 8, 0);
             rtButtons.Children.Add(btnUseGroupInCaja);
@@ -2668,14 +2661,14 @@ namespace EventosPos
                 var actBtns = new StackPanel { Orientation = Orientation.Horizontal };
                 DockPanel.SetDock(actBtns, Dock.Right);
 
-                var btnEditG = CreateIconButton("✏️", "Editar nombre del grupo", () => OpenGroupEditorModal(grpCopy));
+                var btnEditG = CreateIconButton("pencil", "Editar nombre del grupo", () => OpenGroupEditorModal(grpCopy));
                 btnEditG.Width = 26; btnEditG.Height = 26;
                 btnEditG.Margin = new Thickness(0, 0, 4, 0);
                 actBtns.Children.Add(btnEditG);
 
                 if (_db.MenuGroups.Count > 1)
                 {
-                    var btnDelG = CreateIconButton("🗑️", "Eliminar este tipo de evento", () =>
+                    var btnDelG = CreateIconButton("trash-2", "Eliminar este tipo de evento", () =>
                     {
                         if (MessageBox.Show("¿Eliminar el grupo '" + grpCopy.Name + "' y todos sus platos?",
                             "Eliminar Tipo de Evento", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes)
@@ -2764,15 +2757,15 @@ namespace EventosPos
                 DockPanel.SetDock(actions, Dock.Right);
 
                 var prodCopy = prod;
-                var btnPhoto = CreateGhostButton("📷 Foto", () => PickPhotoForProduct(prodCopy));
+                var btnPhoto = CreateGhostButton("Foto", () => PickPhotoForProduct(prodCopy), "camera");
                 btnPhoto.Margin = new Thickness(0, 0, 6, 0);
                 actions.Children.Add(btnPhoto);
 
-                var btnEdit = CreateGhostButton("✏️ Editar", () => OpenProductEditorModal(prodCopy));
+                var btnEdit = CreateGhostButton("Editar", () => OpenProductEditorModal(prodCopy), "pencil");
                 btnEdit.Margin = new Thickness(0, 0, 6, 0);
                 actions.Children.Add(btnEdit);
 
-                var btnDel = CreateGhostButton("🗑️", () =>
+                var btnDel = CreateIconButton("trash-2", "Eliminar plato", () =>
                 {
                     if (MessageBox.Show("¿Eliminar '" + prodCopy.Name + "' de este menú?", "Eliminar Plato", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes)
                     {
@@ -2782,7 +2775,8 @@ namespace EventosPos
                         RenderMenuSection();
                     }
                 });
-                ((TextBlock)btnDel.Child).Foreground = Theme.Err;
+                btnDel.Width = 34;
+                btnDel.Height = 32;
                 actions.Children.Add(btnDel);
                 dock.Children.Add(actions);
 
@@ -2807,6 +2801,26 @@ namespace EventosPos
                 var catBadge = new Border { Background = Theme.BrandBg, CornerRadius = new CornerRadius(4), Padding = new Thickness(6, 1, 6, 1), Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
                 catBadge.Child = new TextBlock { Text = prod.Category, FontSize = 11, FontWeight = FontWeights.SemiBold, Foreground = Theme.Brand };
                 titleRow.Children.Add(catBadge);
+
+                bool isBarItem = string.Equals(prod.PrepStation, "Barra", StringComparison.OrdinalIgnoreCase);
+                var stationBadge = new Border
+                {
+                    Background = isBarItem ? Theme.WarnBg : Theme.Bg,
+                    BorderBrush = isBarItem ? Theme.Warn : Theme.Border,
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(4),
+                    Padding = new Thickness(6, 1, 6, 1),
+                    Margin = new Thickness(6, 0, 0, 0),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                stationBadge.Child = new TextBlock
+                {
+                    Text = isBarItem ? "Barra" : "Cocina",
+                    FontSize = 10,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = isBarItem ? Theme.Warn : Theme.Muted
+                };
+                titleRow.Children.Add(stationBadge);
                 info.Children.Add(titleRow);
 
                 string stockInfo = prod.StockEnabled ? ("Stock: " + prod.StockQty + " u.") : "Stock libre";
@@ -2858,7 +2872,7 @@ namespace EventosPos
                 stack.Children.Add(chkCopyFromCurrent);
             }
 
-            var btnSave = CreatePrimaryButton("💾 Guardar Tipo de Evento", () =>
+            var btnSave = CreatePrimaryButton("Guardar Tipo de Evento", () =>
             {
                 if (string.IsNullOrWhiteSpace(nameBox.Text)) return;
                 if (existing != null)
@@ -2882,6 +2896,7 @@ namespace EventosPos
                                 GroupId = newGroupId,
                                 Name = sp.Name,
                                 Category = sp.Category,
+                                PrepStation = sp.PrepStation,
                                 Price = sp.Price,
                                 StockEnabled = sp.StockEnabled,
                                 StockQty = sp.StockQty,
@@ -2931,7 +2946,7 @@ namespace EventosPos
                     }
                     RefreshAllUI();
                     if (_activeSection == "menu") RenderMenuSection();
-                    ShowToast("📷 Foto actualizada para '" + prod.Name + "'");
+                    ShowToast("Foto actualizada para '" + prod.Name + "'");
                 }
                 catch (Exception ex) { MessageBox.Show(ex.Message, "Error al copiar imagen", MessageBoxButton.OK, MessageBoxImage.Error); }
             }
@@ -3019,7 +3034,7 @@ namespace EventosPos
                 Cursor = Cursors.Hand
             };
             var ciStack = new StackPanel();
-            var ciTitle = new TextBlock { Text = "🍽️ Venta Individual", FontSize = 14, FontWeight = FontWeights.Bold, Foreground = Theme.Text };
+            var ciTitle = new TextBlock { Text = "Venta Individual", FontSize = 14, FontWeight = FontWeights.Bold, Foreground = Theme.Text };
             var ciSub = new TextBlock { Text = "Por unidad (ej. Empanada Carne, Pancho, Bebida)", FontSize = 11, Foreground = Theme.Muted, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) };
             ciStack.Children.Add(ciTitle);
             ciStack.Children.Add(ciSub);
@@ -3036,7 +3051,7 @@ namespace EventosPos
                 Cursor = Cursors.Hand
             };
             var ccStack = new StackPanel();
-            var ccTitle = new TextBlock { Text = "📦 Combo / Pack", FontSize = 14, FontWeight = FontWeights.Bold, Foreground = Theme.Text };
+            var ccTitle = new TextBlock { Text = "Combo / Pack", FontSize = 14, FontWeight = FontWeights.Bold, Foreground = Theme.Text };
             var ccSub = new TextBlock { Text = "Varios sabores de una categoría (ej. Media o Docena)", FontSize = 11, Foreground = Theme.Muted, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) };
             ccStack.Children.Add(ccTitle);
             ccStack.Children.Add(ccSub);
@@ -3061,7 +3076,7 @@ namespace EventosPos
             };
             lockedHint.Child = new TextBlock
             {
-                Text = "👆 Primero seleccioná arriba si el producto es\n'Venta Individual' o 'Combo / Pack' para continuar.",
+                Text = "Primero seleccioná arriba si el producto es\n'Venta Individual' o 'Combo / Pack' para continuar.",
                 FontSize = 13,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = Theme.Muted,
@@ -3095,7 +3110,7 @@ namespace EventosPos
                 Margin = new Thickness(0, 0, 12, 0)
             };
             var thumbImg = new Image { Stretch = Stretch.UniformToFill };
-            var thumbPlaceholder = new TextBlock { Text = "📷", FontSize = 20, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+            var thumbPlaceholder = LucideIcons.Create("camera", 22, Theme.Faint);
 
             Action refreshPhotoPreview = () =>
             {
@@ -3118,7 +3133,7 @@ namespace EventosPos
             var photoBtns = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             DockPanel.SetDock(photoBtns, Dock.Right);
 
-            var btnPickPhoto = CreateGhostButton("📷 Elegir Foto", () =>
+            var btnPickPhoto = CreateGhostButton("Elegir Foto", () =>
             {
                 var dlg = new OpenFileDialog
                 {
@@ -3182,6 +3197,33 @@ namespace EventosPos
             catCombo.Text = existing != null ? existing.Category : "Empanadas";
             formStack.Children.Add(catCombo);
 
+            // Sector de preparación (Cocina o Barra)
+            formStack.Children.Add(new TextBlock
+            {
+                Text = "Sector de preparación / comanda:",
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = Theme.Text,
+                Margin = new Thickness(0, 0, 0, 4)
+            });
+            var stationCombo = new ComboBox { Padding = new Thickness(8, 6, 8, 6), FontSize = 13, Margin = new Thickness(0, 0, 0, 10) };
+            stationCombo.Items.Add("Cocina");
+            stationCombo.Items.Add("Barra");
+            bool initBar = existing != null && string.Equals(existing.PrepStation, "Barra", StringComparison.OrdinalIgnoreCase);
+            stationCombo.SelectedIndex = initBar ? 1 : 0;
+            if (existing == null)
+            {
+                catCombo.SelectionChanged += (s, e) =>
+                {
+                    string selCat = (catCombo.SelectedItem ?? "").ToString().ToLowerInvariant();
+                    if (selCat.Contains("bebida") || selCat.Contains("barra"))
+                        stationCombo.SelectedIndex = 1;
+                    else if (!string.IsNullOrEmpty(selCat))
+                        stationCombo.SelectedIndex = 0;
+                };
+            }
+            formStack.Children.Add(stationCombo);
+
             // SECCIÓN EXCLUSIVA DE VENTA INDIVIDUAL (Stock Propio)
             var indivStockPanel = new Border
             {
@@ -3218,7 +3260,7 @@ namespace EventosPos
             var ccInner = new StackPanel();
             ccInner.Children.Add(new TextBlock
             {
-                Text = "🔗 Enlace de Stock con Categoría Individual",
+                Text = "Enlace de Stock con Categoría Individual",
                 FontSize = 13,
                 FontWeight = FontWeights.Bold,
                 Foreground = Theme.Brand,
@@ -3261,17 +3303,14 @@ namespace EventosPos
             comboConfigPanel.Child = ccInner;
             formStack.Children.Add(comboConfigPanel);
 
-            // Descripción corta + Activo
+            // Descripción corta
             formStack.Children.Add(new TextBlock { Text = "Descripción corta (opcional):", FontSize = 12, Foreground = Theme.Muted, Margin = new Thickness(0, 0, 0, 4) });
             var descBox = CreateStyledTextBox();
             descBox.Text = existing != null ? existing.Description : "";
-            descBox.Margin = new Thickness(0, 0, 0, 10);
+            descBox.Margin = new Thickness(0, 0, 0, 14);
             formStack.Children.Add(descBox);
 
-            var chkActive = new CheckBox { Content = "Visible para la venta en Caja", IsChecked = existing == null || existing.Active, Margin = new Thickness(0, 2, 0, 12), FontSize = 12 };
-            formStack.Children.Add(chkActive);
-
-            var btnSave = CreatePrimaryButton("💾 Guardar Producto", () =>
+            var btnSave = CreatePrimaryButton("Guardar Producto", () =>
             {
                 if (string.IsNullOrEmpty(selectedMode)) return;
                 if (string.IsNullOrWhiteSpace(nameBox.Text))
@@ -3295,6 +3334,7 @@ namespace EventosPos
 
                 string pFilter = isComboMode ? (sourceCatCombo.Text ?? "").Trim() : "";
                 string chosenCat = string.IsNullOrWhiteSpace(catCombo.Text) ? (isComboMode ? "Para Llevar" : "Principales") : catCombo.Text.Trim();
+                string chosenStation = stationCombo.SelectedIndex == 1 ? "Barra" : "Cocina";
 
                 // Si eligió una foto nueva desde su PC, copiarla a static/img/productos/
                 string finalImageFile = selectedImagePath;
@@ -3317,6 +3357,7 @@ namespace EventosPos
                     {
                         target.Name = nameBox.Text.Trim();
                         target.Category = chosenCat;
+                        target.PrepStation = chosenStation;
                         target.Price = pr;
                         target.Description = descBox.Text.Trim();
                         target.StockEnabled = !isComboMode && chkStock.IsChecked == true;
@@ -3325,7 +3366,7 @@ namespace EventosPos
                         target.PackRequiredQty = pQty;
                         target.PackSourceFilter = pFilter;
                         target.ImagePath = finalImageFile;
-                        target.Active = chkActive.IsChecked == true;
+                        target.Active = true;
                     }
                 }
                 else
@@ -3337,6 +3378,7 @@ namespace EventosPos
                         GroupId = _editingGroupId,
                         Name = nameBox.Text.Trim(),
                         Category = chosenCat,
+                        PrepStation = chosenStation,
                         Price = pr,
                         Description = descBox.Text.Trim(),
                         StockEnabled = !isComboMode && chkStock.IsChecked == true,
@@ -3344,7 +3386,7 @@ namespace EventosPos
                         IsCombo = isComboMode,
                         PackRequiredQty = pQty,
                         PackSourceFilter = pFilter,
-                        Active = chkActive.IsChecked == true,
+                        Active = true,
                         ImagePath = finalImageFile
                     });
                 }
@@ -3482,9 +3524,9 @@ namespace EventosPos
                     : (ord.KitchenStatus == "preparando" ? Theme.BrandDark : Theme.Warn)));
 
                 string badgeText = isCancelled ? "ANULADO"
-                    : (isDelivered ? ("✓ ENTREGADO " + delivTime).Trim()
-                    : (isReadyInKitchen ? ("✓ LISTO EN COCINA " + readyTime).Trim()
-                    : (ord.KitchenStatus == "preparando" ? "👨‍🍳 PREPARANDO" : "🔔 EN COCINA")));
+                    : (isDelivered ? ("ENTREGADO " + delivTime).Trim()
+                    : (isReadyInKitchen ? ("LISTO EN COCINA " + readyTime).Trim()
+                    : (ord.KitchenStatus == "preparando" ? "PREPARANDO" : "EN COCINA")));
 
                 var statusBadge = new Border { Background = badgeBg, CornerRadius = Theme.BtnRadius, Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
                 statusBadge.Child = new TextBlock { Text = badgeText, FontSize = 11, FontWeight = FontWeights.Bold, Foreground = badgeFg };
@@ -3493,7 +3535,7 @@ namespace EventosPos
                 var ordCopy = ord;
                 if (isReadyInKitchen)
                 {
-                    var btnMarkDelivered = CreatePrimaryButton("📦 Marcar Entregado", () =>
+                    var btnMarkDelivered = CreatePrimaryButton("Marcar Entregado", () =>
                     {
                         _db = PosStore.Load();
                         var target = _db.Orders.FirstOrDefault(x => x.Id == ordCopy.Id);
@@ -3504,18 +3546,18 @@ namespace EventosPos
                             PosStore.Save(_db);
                             UpdateKitchenCounterBadge();
                             RenderOrdersHistoryList();
-                            ShowToast(string.Format("📦 Pedido #{0:000} marcado como ENTREGADO al cliente.", target.TicketNumber));
+                            ShowToast(string.Format("Pedido #{0:000} marcado como ENTREGADO al cliente.", target.TicketNumber));
                         }
                     }, true);
                     btnMarkDelivered.Margin = new Thickness(0, 0, 6, 0);
                     actions.Children.Add(btnMarkDelivered);
                 }
 
-                var btnReprint = CreateGhostButton("🖨️ Reimprimir", () =>
+                var btnReprint = CreateGhostButton("Reimprimir", () =>
                 {
-                    try { EscPosPrinter.PrintOrder(ordCopy, _db.Settings, false); ShowToast(string.Format("🖨️ Ticket #{0:000} reimpreso.", ordCopy.TicketNumber)); }
+                    try { EscPosPrinter.PrintOrder(ordCopy, _db.Settings, false); ShowToast(string.Format("Ticket #{0:000} reimpreso.", ordCopy.TicketNumber)); }
                     catch (Exception ex) { MessageBox.Show(ex.Message, "Error al imprimir", MessageBoxButton.OK, MessageBoxImage.Error); }
-                });
+                }, "printer");
                 btnReprint.Margin = new Thickness(0, 0, 6, 0);
                 actions.Children.Add(btnReprint);
 
@@ -3611,7 +3653,7 @@ namespace EventosPos
             };
 
             var stack = new StackPanel { Margin = new Thickness(22) };
-            stack.Children.Add(new TextBlock { Text = "🔓 Iniciar Nueva Caja / Evento", FontSize = 17, FontWeight = FontWeights.Bold, Foreground = Theme.Text, Margin = new Thickness(0, 0, 0, 6) });
+            stack.Children.Add(new TextBlock { Text = "Iniciar Nueva Caja / Evento", FontSize = 17, FontWeight = FontWeights.Bold, Foreground = Theme.Text, Margin = new Thickness(0, 0, 0, 6) });
             stack.Children.Add(new TextBlock { Text = "Elegí el nombre de la jornada y qué Grupo de Menú se va a vender en esta caja.", FontSize = 12, Foreground = Theme.Muted, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 14) });
 
             stack.Children.Add(new TextBlock { Text = "Nombre del Evento o Jornada:", FontSize = 12, Foreground = Theme.Muted, Margin = new Thickness(0, 0, 0, 4) });
@@ -3633,7 +3675,7 @@ namespace EventosPos
             var chkResetSeq = new CheckBox { Content = "Reiniciar numeración de tickets a #001", IsChecked = true, Margin = new Thickness(0, 14, 0, 18), FontSize = 12 };
             stack.Children.Add(chkResetSeq);
 
-            var btnStart = CreatePrimaryButton("✓ ABRIR NUEVA CAJA AHORA", () =>
+            var btnStart = CreatePrimaryButton("ABRIR NUEVA CAJA AHORA", () =>
             {
                 string evName = string.IsNullOrWhiteSpace(evBox.Text) ? "Asociación Juvenil Araucana" : evBox.Text.Trim();
                 decimal openCash = 0; decimal.TryParse(cashBox.Text.Trim(), out openCash);
@@ -3668,7 +3710,7 @@ namespace EventosPos
                 RefreshAllUI();
                 if (_activeSection == "caja_actual") RenderCajaActualView();
                 win.Close();
-                ShowToast(string.Format("🔓 Caja #{0:000} abierta con el menú '{1}'", nextId, chosenGrp.Name));
+                ShowToast(string.Format("Caja #{0:000} abierta con el menú '{1}'", nextId, chosenGrp.Name));
             }, false);
 
             stack.Children.Add(btnStart);
@@ -3700,7 +3742,7 @@ namespace EventosPos
                 Effect = Theme.CardShadow()
             };
             var lStack = new StackPanel();
-            lStack.Children.Add(new TextBlock { Text = "🖨️ Ticketera y Métodos de Pago", FontSize = 16, FontWeight = FontWeights.Bold, Foreground = Theme.Text, Margin = new Thickness(0, 0, 0, 14) });
+            lStack.Children.Add(new TextBlock { Text = "Ticketera y Métodos de Pago", FontSize = 16, FontWeight = FontWeights.Bold, Foreground = Theme.Text, Margin = new Thickness(0, 0, 0, 14) });
 
             lStack.Children.Add(new TextBlock { Text = "Ticketera instalada en Windows:", FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = Theme.Muted, Margin = new Thickness(0, 0, 0, 4) });
             _printerCombo = new ComboBox { Padding = new Thickness(10, 7, 10, 7), FontSize = 13, Margin = new Thickness(0, 0, 0, 12) };
@@ -3749,6 +3791,71 @@ namespace EventosPos
             _doubleTicketCheck.Checked += (s, e) => _kitchenPrinterPanel.Visibility = Visibility.Visible;
             _doubleTicketCheck.Unchecked += (s, e) => _kitchenPrinterPanel.Visibility = Visibility.Collapsed;
 
+            // Separación entre Cocina y Barra
+            var barSepBox = new Border
+            {
+                Background = Theme.SurfaceSoft,
+                BorderBrush = Theme.Border,
+                BorderThickness = new Thickness(1),
+                CornerRadius = Theme.BtnRadius,
+                Padding = new Thickness(14, 12, 14, 12),
+                Margin = new Thickness(0, 6, 0, 12)
+            };
+            var barBoxStack = new StackPanel();
+            _chkEnableBarSep = new CheckBox
+            {
+                Content = "Habilitar separación entre Cocina y Barra",
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = Theme.Text
+            };
+            barBoxStack.Children.Add(_chkEnableBarSep);
+            barBoxStack.Children.Add(new TextBlock
+            {
+                Text = "Si está desactivado, todos los productos (incluso bebidas) van a Cocina igualmente.",
+                FontSize = 11,
+                Foreground = Theme.Muted,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(20, 2, 0, 4)
+            });
+
+            _barSepPanel = new StackPanel
+            {
+                Margin = new Thickness(20, 8, 0, 0),
+                Visibility = Visibility.Collapsed
+            };
+            _barSepPanel.Children.Add(new TextBlock
+            {
+                Text = "Impresora para comandas de Barra:",
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = Theme.Brand,
+                Margin = new Thickness(0, 0, 0, 4)
+            });
+            _barPrinterCombo = new ComboBox { Padding = new Thickness(8, 6, 8, 6), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
+            _barSepPanel.Children.Add(_barPrinterCombo);
+
+            _barSepPanel.Children.Add(new TextBlock
+            {
+                Text = "Cantidad de tickets de Barra (0 a 2):",
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = Theme.Brand,
+                Margin = new Thickness(0, 0, 0, 4)
+            });
+            _barCopiesCombo = new ComboBox { Padding = new Thickness(8, 6, 8, 6), FontSize = 12 };
+            _barCopiesCombo.Items.Add("0 tickets (No imprimir comanda de Barra)");
+            _barCopiesCombo.Items.Add("1 ticket de Barra");
+            _barCopiesCombo.Items.Add("2 tickets de Barra");
+            _barSepPanel.Children.Add(_barCopiesCombo);
+
+            barBoxStack.Children.Add(_barSepPanel);
+            barSepBox.Child = barBoxStack;
+            lStack.Children.Add(barSepBox);
+
+            _chkEnableBarSep.Checked += (s, e) => _barSepPanel.Visibility = Visibility.Visible;
+            _chkEnableBarSep.Unchecked += (s, e) => _barSepPanel.Visibility = Visibility.Collapsed;
+
             // Métodos de Pago Habilitados
             var payMethodsBox = new Border
             {
@@ -3760,11 +3867,11 @@ namespace EventosPos
                 Margin = new Thickness(0, 0, 0, 12)
             };
             var pmStack = new StackPanel();
-            pmStack.Children.Add(new TextBlock { Text = "💳 Métodos de Pago Habilitados en Caja", FontSize = 13, FontWeight = FontWeights.Bold, Foreground = Theme.Text, Margin = new Thickness(0, 0, 0, 8) });
+            pmStack.Children.Add(new TextBlock { Text = "Métodos de Pago Habilitados en Caja", FontSize = 13, FontWeight = FontWeights.Bold, Foreground = Theme.Text, Margin = new Thickness(0, 0, 0, 8) });
 
-            _chkEnableCash = new CheckBox { Content = "💵 Efectivo (con calculadora de vuelto)", FontSize = 13, Margin = new Thickness(0, 2, 0, 6) };
-            _chkEnableTransfer = new CheckBox { Content = "📱 Transferencia (muestra Alias en pantalla y ticket)", FontSize = 13, Margin = new Thickness(0, 2, 0, 6) };
-            _chkEnableCard = new CheckBox { Content = "💳 Tarjeta (Débito / Crédito por Posnet)", FontSize = 13, Margin = new Thickness(0, 2, 0, 4) };
+            _chkEnableCash = new CheckBox { Content = "Efectivo (con calculadora de vuelto)", FontSize = 13, Margin = new Thickness(0, 2, 0, 6) };
+            _chkEnableTransfer = new CheckBox { Content = "Transferencia (muestra Alias en pantalla y ticket)", FontSize = 13, Margin = new Thickness(0, 2, 0, 6) };
+            _chkEnableCard = new CheckBox { Content = "Tarjeta (Débito / Crédito por Posnet)", FontSize = 13, Margin = new Thickness(0, 2, 0, 4) };
             pmStack.Children.Add(_chkEnableCash);
             pmStack.Children.Add(_chkEnableTransfer);
             pmStack.Children.Add(_chkEnableCard);
@@ -3790,7 +3897,7 @@ namespace EventosPos
                 Effect = Theme.CardShadow()
             };
             var rStack = new StackPanel();
-            rStack.Children.Add(new TextBlock { Text = "🎨 Personalización del Ticket y Logo", FontSize = 16, FontWeight = FontWeights.Bold, Foreground = Theme.Text, Margin = new Thickness(0, 0, 0, 14) });
+            rStack.Children.Add(new TextBlock { Text = "Personalización del Ticket y Logo", FontSize = 16, FontWeight = FontWeights.Bold, Foreground = Theme.Text, Margin = new Thickness(0, 0, 0, 14) });
 
             var logoPanel = new Border
             {
@@ -3817,7 +3924,7 @@ namespace EventosPos
             logoStack.Children.Add(_logoPreviewBox);
 
             var logoBtns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
-            var btnUploadLogo = CreatePrimaryButton("📷 Subir Logo del Ticket", UploadTicketLogo, true);
+            var btnUploadLogo = CreatePrimaryButton("Subir Logo del Ticket", UploadTicketLogo, true);
             btnUploadLogo.Margin = new Thickness(0, 0, 8, 0);
             logoBtns.Children.Add(btnUploadLogo);
 
@@ -3846,7 +3953,52 @@ namespace EventosPos
 
             rStack.Children.Add(new TextBlock { Text = "Mensaje al pie del ticket:", FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = Theme.Muted, Margin = new Thickness(0, 0, 0, 4) });
             _footerSettingBox = CreateStyledTextBox();
+            _footerSettingBox.Margin = new Thickness(0, 0, 0, 14);
             rStack.Children.Add(_footerSettingBox);
+
+            // Bloque Multi-Caja (Caja Principal vs Caja Secundaria)
+            var multiBox = new Border
+            {
+                Background = Theme.SurfaceSoft,
+                BorderBrush = Theme.Border,
+                BorderThickness = new Thickness(1),
+                CornerRadius = Theme.BtnRadius,
+                Padding = new Thickness(14, 12, 14, 12)
+            };
+            var mStack = new StackPanel();
+            mStack.Children.Add(LucideIcons.IconText("monitor", "Modo Multi-Caja (2 o más Cajas en simultáneo)", 15, Theme.Text, 13, FontWeights.Bold));
+            mStack.Children.Add(new TextBlock
+            {
+                Text = "Usá 'Caja Principal' en la PC 1 y 'Caja Secundaria' en otras PCs para compartir stock y numeración única.",
+                FontSize = 11,
+                Foreground = Theme.Muted,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 4, 0, 8)
+            });
+
+            _cajaModeCombo = new ComboBox { Padding = new Thickness(8, 6, 8, 6), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
+            _cajaModeCombo.Items.Add("Caja Principal (Esta PC guarda datos y stock)");
+            _cajaModeCombo.Items.Add("Caja Secundaria (Conectar a Caja Principal por Wi-Fi/LAN)");
+            mStack.Children.Add(_cajaModeCombo);
+
+            _secondaryIpPanel = new StackPanel { Visibility = Visibility.Collapsed };
+            _secondaryIpPanel.Children.Add(new TextBlock { Text = "IP de la PC Caja Principal (ej. 192.168.0.112):", FontSize = 11, Foreground = Theme.Muted, Margin = new Thickness(0, 2, 0, 4) });
+            _primaryIpBox = CreateStyledTextBox();
+            _primaryIpBox.Margin = new Thickness(0, 0, 0, 8);
+            _secondaryIpPanel.Children.Add(_primaryIpBox);
+
+            _secondaryIpPanel.Children.Add(new TextBlock { Text = "Nombre identificador de esta Caja (ej. Caja 2):", FontSize = 11, Foreground = Theme.Muted, Margin = new Thickness(0, 0, 0, 4) });
+            _registerNameBox = CreateStyledTextBox();
+            _secondaryIpPanel.Children.Add(_registerNameBox);
+            mStack.Children.Add(_secondaryIpPanel);
+
+            _cajaModeCombo.SelectionChanged += (s, e) =>
+            {
+                _secondaryIpPanel.Visibility = _cajaModeCombo.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+            };
+
+            multiBox.Child = mStack;
+            rStack.Children.Add(multiBox);
 
             rightCard.Child = rStack;
             Grid.SetColumn(rightCard, 2);
@@ -3864,20 +4016,20 @@ namespace EventosPos
                 Padding = new Thickness(18, 14, 18, 14)
             };
             var btnsRow = new StackPanel { Orientation = Orientation.Horizontal };
-            var btnSave = CreatePrimaryButton("💾 Guardar Configuración", SaveSettingsFromForm, false);
+            var btnSave = CreatePrimaryButton("Guardar Configuración", SaveSettingsFromForm, false);
             btnSave.Margin = new Thickness(0, 0, 10, 0);
             btnsRow.Children.Add(btnSave);
 
-            var btnTest = CreateGhostButton("🖨️ Imprimir Ticket de Prueba (con Logo)", () =>
+            var btnTest = CreateGhostButton("Imprimir Ticket de Prueba (con Logo)", () =>
             {
                 SaveSettingsFromForm();
-                try { EscPosPrinter.PrintTestTicket(_db.Settings); ShowToast("🖨️ Ticket de prueba (con logo) enviado a " + _db.Settings.PrinterName); }
+                try { EscPosPrinter.PrintTestTicket(_db.Settings); ShowToast("Ticket de prueba (con logo) enviado a " + _db.Settings.PrinterName); }
                 catch (Exception ex) { MessageBox.Show(ex.Message, "Error en Ticketera", MessageBoxButton.OK, MessageBoxImage.Error); }
             });
             btnTest.Margin = new Thickness(0, 0, 10, 0);
             btnsRow.Children.Add(btnTest);
 
-            var btnUpdates = CreateGhostButton("🔄 Buscar Actualizaciones (v" + GitHubUpdater.AppVersion + ")", () =>
+            var btnUpdates = CreateGhostButton("Buscar Actualizaciones (v" + GitHubUpdater.AppVersion + ")", () =>
             {
                 GitHubUpdater.CheckForUpdatesAsync(this, "Caja_POS.exe", true);
             });
@@ -3910,7 +4062,7 @@ namespace EventosPos
                     PosStore.Save(_db);
                     _chkPrintLogo.IsChecked = true;
                     RefreshLogoPreview();
-                    ShowToast("📷 Logo cargado correctamente. Probá tocar 'Imprimir Ticket de Prueba' para verlo en papel.");
+                    ShowToast("Logo cargado correctamente. Probá tocar 'Imprimir Ticket de Prueba' para verlo en papel.");
                 }
                 catch (Exception ex)
                 {
@@ -3952,11 +4104,14 @@ namespace EventosPos
             var installed = EscPosPrinter.ListInstalledPrinters();
             _printerCombo.Items.Clear();
             _kitchenPrinterCombo.Items.Clear();
+            _barPrinterCombo.Items.Clear();
             _kitchenPrinterCombo.Items.Add("(Misma ticketera seleccionada en Caja)");
+            _barPrinterCombo.Items.Add("(Misma ticketera seleccionada en Caja)");
             foreach (var p in installed)
             {
                 _printerCombo.Items.Add(p);
                 _kitchenPrinterCombo.Items.Add(p);
+                _barPrinterCombo.Items.Add(p);
             }
 
             string currentPrinter = _db.Settings.PrinterName ?? EscPosPrinter.DetectPreferredPrinter();
@@ -3971,12 +4126,24 @@ namespace EventosPos
                 if (_kitchenPrinterCombo.SelectedItem == null) _kitchenPrinterCombo.SelectedIndex = 0;
             }
 
+            if (string.IsNullOrWhiteSpace(_db.Settings.BarPrinterName))
+                _barPrinterCombo.SelectedIndex = 0;
+            else
+            {
+                _barPrinterCombo.SelectedItem = _db.Settings.BarPrinterName;
+                if (_barPrinterCombo.SelectedItem == null) _barPrinterCombo.SelectedIndex = 0;
+            }
+
             _paperWidthCombo.SelectedIndex = _db.Settings.PaperWidthMm == 58 ? 1 : 0;
             int copiesIdx = Math.Max(1, Math.Min(4, _db.Settings.ClientTicketCopies)) - 1;
             _copiesCombo.SelectedIndex = copiesIdx;
 
             _doubleTicketCheck.IsChecked = _db.Settings.PrintDoubleTicket;
             _kitchenPrinterPanel.Visibility = _db.Settings.PrintDoubleTicket ? Visibility.Visible : Visibility.Collapsed;
+
+            _chkEnableBarSep.IsChecked = _db.Settings.EnableBarSeparation;
+            _barSepPanel.Visibility = _db.Settings.EnableBarSeparation ? Visibility.Visible : Visibility.Collapsed;
+            _barCopiesCombo.SelectedIndex = Math.Max(0, Math.Min(2, _db.Settings.BarTicketCopies));
             _chkEnableCash.IsChecked = _db.Settings.EnableCash;
             _chkEnableTransfer.IsChecked = _db.Settings.EnableTransfer;
             _chkEnableCard.IsChecked = _db.Settings.EnableCard;
@@ -3987,6 +4154,12 @@ namespace EventosPos
 
             _mpAliasSettingBox.Text = _db.Settings.MpAlias;
             _footerSettingBox.Text = _db.Settings.TicketFooter;
+
+            _cajaModeCombo.SelectedIndex = _isSecondaryMode ? 1 : 0;
+            _secondaryIpPanel.Visibility = _isSecondaryMode ? Visibility.Visible : Visibility.Collapsed;
+            _primaryIpBox.Text = _primaryCajaIp;
+            _registerNameBox.Text = string.IsNullOrWhiteSpace(_registerName) ? "Caja 2" : _registerName;
+
             RefreshLogoPreview();
         }
 
@@ -3998,11 +4171,40 @@ namespace EventosPos
                 _chkEnableCash.IsChecked = true;
             }
 
+            // Guardar configuración local de Modo Multi-Caja
+            bool wantSecondary = _cajaModeCombo.SelectedIndex == 1;
+            if (wantSecondary)
+            {
+                string ip = _primaryIpBox.Text.Trim();
+                string rName = string.IsNullOrWhiteSpace(_registerNameBox.Text) ? "Caja 2" : _registerNameBox.Text.Trim();
+                if (string.IsNullOrEmpty(ip))
+                {
+                    MessageBox.Show("Ingresá la IP de la PC Caja Principal para conectarte como Caja Secundaria.", "Multi-Caja", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                _isSecondaryMode = true;
+                _primaryCajaIp = ip;
+                _registerName = rName;
+                PosNetworkSync.StopCajaServer();
+                File.WriteAllText(_cajaModeConfigPath, "secundaria|" + ip + "|" + rName, System.Text.Encoding.UTF8);
+            }
+            else
+            {
+                _isSecondaryMode = false;
+                _primaryCajaIp = "";
+                _registerName = "Caja Principal";
+                if (File.Exists(_cajaModeConfigPath)) File.Delete(_cajaModeConfigPath);
+                PosNetworkSync.StartCajaServer();
+            }
+
             if (_printerCombo.SelectedItem != null) _db.Settings.PrinterName = _printerCombo.SelectedItem.ToString();
             _db.Settings.PaperWidthMm = _paperWidthCombo.SelectedIndex == 1 ? 58 : 80;
             _db.Settings.ClientTicketCopies = Math.Max(1, Math.Min(4, _copiesCombo.SelectedIndex + 1));
             _db.Settings.PrintDoubleTicket = _doubleTicketCheck.IsChecked == true;
             _db.Settings.KitchenPrinterName = _kitchenPrinterCombo.SelectedIndex <= 0 ? "" : _kitchenPrinterCombo.SelectedItem.ToString();
+            _db.Settings.EnableBarSeparation = _chkEnableBarSep.IsChecked == true;
+            _db.Settings.BarPrinterName = _barPrinterCombo.SelectedIndex <= 0 ? "" : _barPrinterCombo.SelectedItem.ToString();
+            _db.Settings.BarTicketCopies = Math.Max(0, Math.Min(2, _barCopiesCombo.SelectedIndex));
             _db.Settings.EnableCash = _chkEnableCash.IsChecked == true;
             _db.Settings.EnableTransfer = _chkEnableTransfer.IsChecked == true;
             _db.Settings.EnableCard = _chkEnableCard.IsChecked == true;
@@ -4010,10 +4212,18 @@ namespace EventosPos
             _db.Settings.TicketLogoWidthPx = _logoSizeCombo.SelectedIndex == 0 ? 200 : (_logoSizeCombo.SelectedIndex == 2 ? 360 : 280);
             _db.Settings.MpAlias = string.IsNullOrWhiteSpace(_mpAliasSettingBox.Text) ? "araucana24" : _mpAliasSettingBox.Text.Trim();
             _db.Settings.TicketFooter = _footerSettingBox.Text.Trim();
-            PosStore.Save(_db);
+
+            if (!_isSecondaryMode)
+                PosStore.Save(_db);
+            else
+                _db = LoadCurrentDatabase();
+
+            if (_lanBadgeText != null)
+                _lanBadgeText.Text = _isSecondaryMode ? (_registerName + " → " + _primaryCajaIp) : ("IP: " + PosNetworkSync.GetLocalLanIp());
+
             RenderPaymentMethodButtons();
             RefreshAllUI();
-            ShowToast("⚙️ Configuración guardada correctamente.");
+            ShowToast("Configuración guardada correctamente.");
         }
 
         // =====================================================================
@@ -4053,22 +4263,32 @@ namespace EventosPos
         {
             int activeInKitchen = _db.Orders.Count(o => o.Status == "completado" && (o.KitchenStatus == "pendiente" || o.KitchenStatus == "preparando"));
             int readyToDeliver = _db.Orders.Count(o => o.Status == "completado" && o.KitchenStatus == "finalizado");
-            _kitchenBadgeText.Text = string.Format("👨‍🍳 Cocina: {0} en curso · {1} listos para entregar", activeInKitchen, readyToDeliver);
+            _kitchenBadgeText.Text = string.Format("Cocina: {0} en curso · {1} listos", activeInKitchen, readyToDeliver);
         }
 
         private void BackgroundSync()
         {
             try
             {
-                var diskDb = PosStore.Load();
-                _db.Orders = diskDb.Orders;
+                var latestDb = LoadCurrentDatabase();
+                bool stockChanged = _isSecondaryMode;
+                _db.Orders = latestDb.Orders;
+                if (_isSecondaryMode)
+                {
+                    _db.Products = latestDb.Products;
+                    _db.Sessions = latestDb.Sessions;
+                    _db.Settings.NextTicketSequence = latestDb.Settings.NextTicketSequence;
+                    _nextTicketText.Text = string.Format("PRÓXIMO: #{0:000}", _db.Settings.NextTicketSequence);
+                    if (_activeSection == "pos" && stockChanged)
+                        RenderProductCards();
+                }
                 UpdateKitchenCounterBadge();
                 if (_activeSection == "orders") RenderOrdersHistoryList();
             }
             catch { }
         }
 
-        private Border CreatePrimaryButton(string text, Action onClick, bool compact)
+        private Border CreatePrimaryButton(string text, Action onClick, bool compact, string lucideIcon = null)
         {
             var b = new Border
             {
@@ -4077,22 +4297,29 @@ namespace EventosPos
                 Padding = compact ? new Thickness(10, 7, 10, 7) : new Thickness(16, 10, 16, 10),
                 Cursor = Cursors.Hand
             };
-            b.Child = new TextBlock
+            if (!string.IsNullOrEmpty(lucideIcon))
             {
-                Text = text,
-                FontSize = compact ? 12 : 13,
-                FontWeight = FontWeights.Bold,
-                Foreground = Brushes.White,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
+                b.Child = LucideIcons.IconText(lucideIcon, text, compact ? 14 : 15, Brushes.White, compact ? 12 : 13, FontWeights.Bold);
+            }
+            else
+            {
+                b.Child = new TextBlock
+                {
+                    Text = text,
+                    FontSize = compact ? 12 : 13,
+                    FontWeight = FontWeights.Bold,
+                    Foreground = Brushes.White,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+            }
             b.MouseEnter += (s, e) => b.Background = Theme.BrandDark;
             b.MouseLeave += (s, e) => b.Background = Theme.Brand;
             b.MouseLeftButtonUp += (s, e) => onClick();
             return b;
         }
 
-        private Border CreateGhostButton(string text, Action onClick)
+        private Border CreateGhostButton(string text, Action onClick, string lucideIcon = null)
         {
             var b = new Border
             {
@@ -4103,22 +4330,29 @@ namespace EventosPos
                 Padding = new Thickness(12, 7, 12, 7),
                 Cursor = Cursors.Hand
             };
-            b.Child = new TextBlock
+            if (!string.IsNullOrEmpty(lucideIcon))
             {
-                Text = text,
-                FontSize = 12,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = Theme.Text,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
+                b.Child = LucideIcons.IconText(lucideIcon, text, 14, Theme.Text, 12, FontWeights.SemiBold);
+            }
+            else
+            {
+                b.Child = new TextBlock
+                {
+                    Text = text,
+                    FontSize = 12,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = Theme.Text,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+            }
             b.MouseEnter += (s, e) => b.Background = Theme.Hover;
             b.MouseLeave += (s, e) => b.Background = Theme.Card;
             b.MouseLeftButtonUp += (s, e) => onClick();
             return b;
         }
 
-        private Border CreateIconButton(string icon, string tooltip, Action onClick)
+        private Border CreateIconButton(string iconOrLucide, string tooltip, Action onClick)
         {
             var b = new Border
             {
@@ -4131,15 +4365,14 @@ namespace EventosPos
                 ToolTip = tooltip,
                 Cursor = Cursors.Hand
             };
-            b.Child = new TextBlock
-            {
-                Text = icon,
-                FontSize = 13,
-                FontWeight = FontWeights.Bold,
-                Foreground = Theme.Text,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
+            string mapped = iconOrLucide == "✏️" ? "pencil"
+                : (iconOrLucide == "🗑️" ? "trash-2"
+                : (iconOrLucide == "📷" ? "camera"
+                : (iconOrLucide == "+" ? "plus"
+                : (iconOrLucide == "−" ? "minus"
+                : (iconOrLucide == "🖨️" ? "printer" : iconOrLucide)))));
+
+            b.Child = LucideIcons.Create(mapped, 15, mapped == "trash-2" ? Theme.Err : Theme.Text);
             b.MouseEnter += (s, e) => b.Background = Theme.Hover;
             b.MouseLeave += (s, e) => b.Background = Theme.Bg;
             b.MouseLeftButtonUp += (s, e) => onClick();

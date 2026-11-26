@@ -46,6 +46,7 @@ namespace EventosPos
         public string PackSourceFilter { get; set; }   // ej: "Empanada" para tomar todos los sabores de empanada
         public string Description { get; set; }
         public string ImagePath { get; set; }
+        public string PrepStation { get; set; }        // "Cocina" o "Barra"
         public bool Active { get; set; }
     }
 
@@ -54,6 +55,7 @@ namespace EventosPos
         public int ProductId { get; set; }
         public string ProductName { get; set; }
         public string Category { get; set; }
+        public string PrepStation { get; set; }        // "Cocina" o "Barra"
         public int Quantity { get; set; }
         public decimal UnitPrice { get; set; }
         public decimal Subtotal { get; set; }
@@ -83,6 +85,7 @@ namespace EventosPos
         public string CreatedAt { get; set; }
         public string FinishedAt { get; set; }
         public string DeliveredAt { get; set; }
+        public string RegisterName { get; set; } // Ej: "Caja Principal", "Caja 2"
         public List<OrderLineItem> Items { get; set; }
 
         public OrderRecord()
@@ -123,6 +126,9 @@ namespace EventosPos
         public bool PrintDoubleTicket { get; set; }     // Desactivado por defecto (Cocina_POS imprime las suyas)
         public string PrinterName { get; set; }
         public string KitchenPrinterName { get; set; }  // Vacío = misma ticketera que Caja
+        public bool EnableBarSeparation { get; set; }   // Separar comandas de Cocina vs Barra
+        public string BarPrinterName { get; set; }      // Vacío = misma ticketera que Caja
+        public int BarTicketCopies { get; set; }        // 0 = no imprimir barra, 1 o 2 copias
         public string TicketFooter { get; set; }
 
         // Métodos de pago configurables
@@ -146,6 +152,9 @@ namespace EventosPos
             PrintDoubleTicket = false; // Desactivado por defecto porque Cocina_POS imprime sus comandas
             PrinterName = "Xprinter XP-80";
             KitchenPrinterName = "";
+            EnableBarSeparation = false;
+            BarPrinterName = "";
+            BarTicketCopies = 1;
             TicketFooter = "Alias Transferencia: araucana24 - ¡Gracias por colaborar!";
             EnableCash = true;
             EnableTransfer = true;
@@ -232,6 +241,11 @@ namespace EventosPos
                             foreach (var p in payload.Products)
                             {
                                 if (p.GroupId <= 0) p.GroupId = 1;
+                                if (string.IsNullOrWhiteSpace(p.PrepStation))
+                                {
+                                    string lowCat = (p.Category ?? "").ToLowerInvariant();
+                                    p.PrepStation = (lowCat.Contains("bebida") || lowCat.Contains("barra")) ? "Barra" : "Cocina";
+                                }
                                 // Auto-configurar packs de empanadas existentes si vienen de una versión anterior
                                 string lowName = (p.Name ?? "").ToLowerInvariant();
                                 if (p.PackRequiredQty == 0 && lowName.Contains("docena") && lowName.Contains("empanada"))
@@ -460,6 +474,7 @@ namespace EventosPos
         private static Thread _serverThread;
         private static Thread _beaconThread;
         private static volatile bool _running;
+        private static readonly object OrderSyncLock = new object();
 
         public static string GetLocalLanIp()
         {
@@ -600,6 +615,32 @@ namespace EventosPos
                                 }
                             }
                         }
+                        else if (cmdLine.StartsWith("CREATE_ORDER|"))
+                        {
+                            // Multi-Caja: Caja Secundaria envía un pedido a Caja Principal para asignar
+                            // número correlativo único y descontar stock de forma atómica.
+                            string orderJson = cmdLine.Substring("CREATE_ORDER|".Length);
+                            var ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+                            var draft = ser.Deserialize<OrderRecord>(orderJson);
+                            string errMsg;
+                            var created = CreateOrderAtomicLocal(draft, out errMsg);
+                            if (created == null)
+                                writer.WriteLine("ERR|" + (errMsg ?? "No se pudo registrar el pedido."));
+                            else
+                                writer.WriteLine("OK|" + ser.Serialize(created));
+                        }
+                        else if (cmdLine.StartsWith("CANCEL_ORDER|"))
+                        {
+                            string[] parts = cmdLine.Split('|');
+                            int orderId;
+                            if (parts.Length >= 2 && int.TryParse(parts[1], out orderId))
+                            {
+                                CancelOrderAtomicLocal(orderId);
+                                var db = PosStore.Load();
+                                var ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+                                writer.WriteLine(ser.Serialize(db));
+                            }
+                        }
                         else if (cmdLine.StartsWith("MARK_PRINTED|"))
                         {
                             string[] parts = cmdLine.Split('|');
@@ -668,6 +709,161 @@ namespace EventosPos
                     string json = reader.ReadLine();
                     var ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
                     return ser.Deserialize<PosDatabasePayload>(json);
+                }
+            }
+        }
+
+        public static OrderRecord CreateOrderAtomicLocal(OrderRecord draft, out string errorMessage)
+        {
+            errorMessage = null;
+            lock (OrderSyncLock)
+            {
+                var db = PosStore.Load();
+                var activeSession = PosStore.GetActiveSession(db);
+                if (activeSession == null)
+                {
+                    errorMessage = "La Caja Principal está cerrada. Abrí una nueva caja en la PC Principal.";
+                    return null;
+                }
+
+                // 1. Validar stock real disponible de cada producto / sabor
+                var neededQtyByProduct = new Dictionary<int, int>();
+                foreach (var line in draft.Items)
+                {
+                    if (line.PackChoices != null && line.PackChoices.Count > 0)
+                    {
+                        foreach (var pc in line.PackChoices)
+                        {
+                            if (!neededQtyByProduct.ContainsKey(pc.ProductId)) neededQtyByProduct[pc.ProductId] = 0;
+                            neededQtyByProduct[pc.ProductId] += pc.Quantity * line.Quantity;
+                        }
+                    }
+                    else
+                    {
+                        if (!neededQtyByProduct.ContainsKey(line.ProductId)) neededQtyByProduct[line.ProductId] = 0;
+                        neededQtyByProduct[line.ProductId] += line.Quantity;
+                    }
+                }
+
+                foreach (var kv in neededQtyByProduct)
+                {
+                    var prod = db.Products.FirstOrDefault(p => p.Id == kv.Key);
+                    if (prod != null && prod.StockEnabled && prod.StockQty < kv.Value)
+                    {
+                        errorMessage = string.Format("Stock insuficiente para '{0}'. Disponible ahora: {1} u. (otra caja pudo haberlo vendido recién).", prod.Name, prod.StockQty);
+                        return null;
+                    }
+                }
+
+                // 2. Descontar stock atómicamente
+                foreach (var kv in neededQtyByProduct)
+                {
+                    var prod = db.Products.FirstOrDefault(p => p.Id == kv.Key);
+                    if (prod != null && prod.StockEnabled)
+                        prod.StockQty = Math.Max(0, prod.StockQty - kv.Value);
+                }
+
+                int nextId = db.Orders.Count == 0 ? 1 : db.Orders.Max(o => o.Id) + 1;
+                int ticketNum = db.Settings.NextTicketSequence;
+
+                draft.Id = nextId;
+                draft.SessionId = activeSession.Id;
+                draft.TicketNumber = ticketNum;
+                draft.EventName = activeSession.EventName;
+                draft.Status = "completado";
+
+                // Si la separación Cocina/Barra está activa y el pedido SOLO tiene ítems de Barra, no queda pendiente en Cocina
+                bool hasKitchenItems = !db.Settings.EnableBarSeparation
+                    || draft.Items.Any(i => !string.Equals(i.PrepStation, "Barra", StringComparison.OrdinalIgnoreCase));
+                draft.KitchenStatus = hasKitchenItems ? "pendiente" : "finalizado";
+                draft.KitchenPrinted = !hasKitchenItems;
+                draft.CreatedAt = DateTime.Now.ToString("dd/MM/yyyy HH:mm");
+                draft.FinishedAt = hasKitchenItems ? "" : DateTime.Now.ToString("HH:mm");
+                draft.DeliveredAt = "";
+
+                db.Orders.Add(draft);
+                db.Settings.NextTicketSequence = ticketNum + 1;
+                PosStore.RecalculateSessionMetrics(db, activeSession);
+                PosStore.Save(db);
+                return draft;
+            }
+        }
+
+        public static void CancelOrderAtomicLocal(int orderId)
+        {
+            lock (OrderSyncLock)
+            {
+                var db = PosStore.Load();
+                var target = db.Orders.FirstOrDefault(x => x.Id == orderId);
+                if (target != null && target.Status != "anulado")
+                {
+                    target.Status = "anulado";
+                    foreach (var it in target.Items)
+                    {
+                        if (it.PackChoices != null && it.PackChoices.Count > 0)
+                        {
+                            foreach (var pc in it.PackChoices)
+                            {
+                                var fp = db.Products.FirstOrDefault(x => x.Id == pc.ProductId);
+                                if (fp != null && fp.StockEnabled) fp.StockQty += (pc.Quantity * it.Quantity);
+                            }
+                        }
+                        else
+                        {
+                            var p = db.Products.FirstOrDefault(x => x.Id == it.ProductId);
+                            if (p != null && p.StockEnabled) p.StockQty += it.Quantity;
+                        }
+                    }
+                    PosStore.RecalculateSessionMetrics(db, PosStore.GetActiveSession(db));
+                    PosStore.Save(db);
+                }
+            }
+        }
+
+        public static OrderRecord SendCreateOrderToCajaIp(string hostIp, OrderRecord draft)
+        {
+            using (var client = new TcpClient())
+            {
+                var result = client.BeginConnect(hostIp, TcpPort, null, null);
+                if (!result.AsyncWaitHandle.WaitOne(TimeSpan.FromMilliseconds(1800)) || !client.Connected)
+                    throw new Exception("No se pudo conectar con la Caja Principal en " + hostIp);
+
+                client.EndConnect(result);
+                client.ReceiveTimeout = 3500;
+                client.SendTimeout = 3500;
+
+                using (var stream = client.GetStream())
+                using (var reader = new StreamReader(stream, Encoding.UTF8))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true })
+                {
+                    var ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+                    writer.WriteLine("CREATE_ORDER|" + ser.Serialize(draft));
+                    string resp = reader.ReadLine();
+                    if (string.IsNullOrEmpty(resp))
+                        throw new Exception("Sin respuesta de la Caja Principal.");
+                    if (resp.StartsWith("ERR|"))
+                        throw new Exception(resp.Substring(4));
+                    if (resp.StartsWith("OK|"))
+                        return ser.Deserialize<OrderRecord>(resp.Substring(3));
+                    throw new Exception("Respuesta inesperada de la Caja Principal.");
+                }
+            }
+        }
+
+        public static void SendCancelOrderToCajaIp(string hostIp, int orderId)
+        {
+            using (var client = new TcpClient())
+            {
+                var result = client.BeginConnect(hostIp, TcpPort, null, null);
+                if (!result.AsyncWaitHandle.WaitOne(TimeSpan.FromMilliseconds(1500)) || !client.Connected)
+                    throw new Exception("No se pudo conectar con la Caja Principal en " + hostIp);
+                client.EndConnect(result);
+                using (var stream = client.GetStream())
+                using (var reader = new StreamReader(stream, Encoding.UTF8))
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true })
+                {
+                    writer.WriteLine("CANCEL_ORDER|" + orderId);
+                    reader.ReadLine();
                 }
             }
         }
@@ -997,6 +1193,7 @@ namespace EventosPos
 
             string cajaPrinter = string.IsNullOrWhiteSpace(settings.PrinterName) ? DetectPreferredPrinter() : settings.PrinterName;
             string kitchenPrinter = string.IsNullOrWhiteSpace(settings.KitchenPrinterName) ? cajaPrinter : settings.KitchenPrinterName;
+            string barPrinter = string.IsNullOrWhiteSpace(settings.BarPrinterName) ? cajaPrinter : settings.BarPrinterName;
             int copies = Math.Max(1, Math.Min(4, settings.ClientTicketCopies));
 
             if (!onlyKitchen)
@@ -1076,49 +1273,96 @@ namespace EventosPos
                 // Enviar las copias del ticket de cliente a la ticketera de Caja
                 SendRawBytes(cajaPrinter, ms.ToArray());
                 ms = new MemoryStream();
+
+                // Si la separación Cocina/Barra está habilitada y hay ítems de Barra, imprimir 0..2 comandas en la ticketera de Barra
+                if (settings.EnableBarSeparation && settings.BarTicketCopies > 0)
+                {
+                    var barItems = order.Items.Where(i => string.Equals(i.PrepStation, "Barra", StringComparison.OrdinalIgnoreCase)).ToList();
+                    if (barItems.Count > 0)
+                    {
+                        int barCopies = Math.Max(0, Math.Min(2, settings.BarTicketCopies));
+                        var barMs = new MemoryStream();
+                        Action<byte[]> bw = b => barMs.Write(b, 0, b.Length);
+                        Action<string> bl = s => { byte[] bb = Encoding.ASCII.GetBytes(CleanAscii(s) + "\n"); barMs.Write(bb, 0, bb.Length); };
+                        for (int bc = 0; bc < barCopies; bc++)
+                        {
+                            bw(INIT); bw(FONT_A); bw(MARGIN_ZERO); bw(WIDTH_FULL);
+                            bw(ALIGN_CENTER); bw(BOLD_ON);
+                            bl("*** COMANDA DE BARRA ***");
+                            bw(SIZE_LARGE);
+                            bl(string.Format("PEDIDO #{0:000}", order.TicketNumber));
+                            bw(SIZE_NORMAL); bw(BOLD_OFF);
+                            bl(order.CreatedAt);
+                            bl(sepEq);
+                            bw(ALIGN_LEFT);
+                            foreach (var it in barItems)
+                            {
+                                bw(BOLD_ON); bw(SIZE_TALL);
+                                bl(string.Format("[{0}x] {1}", it.Quantity, it.ProductName.ToUpperInvariant()));
+                                bw(SIZE_NORMAL);
+                                if (!string.IsNullOrWhiteSpace(it.Note))
+                                    bl("   >> OBS: " + it.Note.ToUpperInvariant());
+                                bw(BOLD_OFF);
+                            }
+                            if (!string.IsNullOrWhiteSpace(order.Notes))
+                            {
+                                bl(sepDash); bw(BOLD_ON); bl("NOTA: " + order.Notes.ToUpperInvariant()); bw(BOLD_OFF);
+                            }
+                            bl(sepEq); bl(""); bw(CUT);
+                        }
+                        SendRawBytes(barPrinter, barMs.ToArray());
+                    }
+                }
             }
 
             if (onlyKitchen || settings.PrintDoubleTicket)
             {
-                write(INIT); write(FONT_A); write(MARGIN_ZERO); write(WIDTH_FULL);
-                write(ALIGN_CENTER);
-                write(BOLD_ON);
-                line("*** COMANDA DE COCINA ***");
-                write(SIZE_LARGE);
-                line(string.Format("PEDIDO #{0:000}", order.TicketNumber));
-                write(SIZE_NORMAL); write(BOLD_OFF);
-                line(order.CreatedAt);
-                line(sepEq);
+                var kitchenItems = settings.EnableBarSeparation
+                    ? order.Items.Where(i => !string.Equals(i.PrepStation, "Barra", StringComparison.OrdinalIgnoreCase)).ToList()
+                    : order.Items;
 
-                write(ALIGN_LEFT);
-                foreach (var it in order.Items)
+                if (kitchenItems.Count > 0)
                 {
-                    write(BOLD_ON); write(SIZE_TALL);
-                    line(string.Format("[{0}x] {1}", it.Quantity, it.ProductName.ToUpperInvariant()));
-                    write(SIZE_NORMAL);
-                    if (it.PackChoices != null && it.PackChoices.Count > 0)
-                    {
-                        foreach (var pc in it.PackChoices)
-                            line(string.Format("   - {0}x {1}", pc.Quantity, pc.ProductName.ToUpperInvariant()));
-                    }
-                    if (!string.IsNullOrWhiteSpace(it.Note))
-                        line("   >> OBS: " + it.Note.ToUpperInvariant());
-                    write(BOLD_OFF);
-                }
-
-                if (!string.IsNullOrWhiteSpace(order.Notes))
-                {
-                    line(sepDash);
+                    write(INIT); write(FONT_A); write(MARGIN_ZERO); write(WIDTH_FULL);
+                    write(ALIGN_CENTER);
                     write(BOLD_ON);
-                    line("NOTA: " + order.Notes.ToUpperInvariant());
-                    write(BOLD_OFF);
-                }
-                line(sepEq);
-                line("");
-                write(CUT);
+                    line("*** COMANDA DE COCINA ***");
+                    write(SIZE_LARGE);
+                    line(string.Format("PEDIDO #{0:000}", order.TicketNumber));
+                    write(SIZE_NORMAL); write(BOLD_OFF);
+                    line(order.CreatedAt);
+                    line(sepEq);
 
-                string targetKitchenPrinter = onlyKitchen ? cajaPrinter : kitchenPrinter;
-                SendRawBytes(targetKitchenPrinter, ms.ToArray());
+                    write(ALIGN_LEFT);
+                    foreach (var it in kitchenItems)
+                    {
+                        write(BOLD_ON); write(SIZE_TALL);
+                        line(string.Format("[{0}x] {1}", it.Quantity, it.ProductName.ToUpperInvariant()));
+                        write(SIZE_NORMAL);
+                        if (it.PackChoices != null && it.PackChoices.Count > 0)
+                        {
+                            foreach (var pc in it.PackChoices)
+                                line(string.Format("   - {0}x {1}", pc.Quantity, pc.ProductName.ToUpperInvariant()));
+                        }
+                        if (!string.IsNullOrWhiteSpace(it.Note))
+                            line("   >> OBS: " + it.Note.ToUpperInvariant());
+                        write(BOLD_OFF);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(order.Notes))
+                    {
+                        line(sepDash);
+                        write(BOLD_ON);
+                        line("NOTA: " + order.Notes.ToUpperInvariant());
+                        write(BOLD_OFF);
+                    }
+                    line(sepEq);
+                    line("");
+                    write(CUT);
+
+                    string targetKitchenPrinter = onlyKitchen ? cajaPrinter : kitchenPrinter;
+                    SendRawBytes(targetKitchenPrinter, ms.ToArray());
+                }
             }
         }
 
@@ -1291,7 +1535,7 @@ namespace EventosPos
 
     public static class GitHubUpdater
     {
-        public const string AppVersion = "1.0.5";
+        public const string AppVersion = "1.0.8";
         public const string GitHubRepo = "Vanessaalberti/sistema-eventos";
 
         private static Version ParseVersionSafe(string raw)

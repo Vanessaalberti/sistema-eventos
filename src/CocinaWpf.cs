@@ -73,16 +73,18 @@ namespace EventosPos
         private string _manualCajaIp = "";
         private string _activeCajaIp = ""; // IP remota conectada actualmente (vacío si lee local en la misma PC)
         private string _localKitchenPrinter = "";
+        private string _currentConnLabel = "Buscando PC de Caja...";
+        private bool _isConnectedToCaja = false;
+        private bool _autoPrintEnabled = true;
         private bool _isListeningUdp = true;
         private readonly string _ipConfigPath = Path.Combine(PosStore.DataDir, "cocina_ip.txt");
         private readonly string _printerConfigPath = Path.Combine(PosStore.DataDir, "cocina_printer.txt");
+        private readonly string _autoPrintConfigPath = Path.Combine(PosStore.DataDir, "cocina_autoprint.txt");
 
-        private Border _netStatusBadge;
-        private TextBlock _netStatusText;
+        private TextBlock _headerSubtitleText;
         private TextBlock _pendingCountText;
         private TextBlock _prepCountText;
         private TextBlock _doneCountText;
-        private CheckBox _autoPrintCheck;
         private WrapPanel _activeWrap;
         private StackPanel _finishedStack;
         private ScrollViewer _activeScroll;
@@ -106,6 +108,11 @@ namespace EventosPos
             if (string.IsNullOrWhiteSpace(_localKitchenPrinter))
             {
                 _localKitchenPrinter = EscPosPrinter.DetectPreferredPrinter();
+            }
+            if (File.Exists(_autoPrintConfigPath))
+            {
+                string ap = File.ReadAllText(_autoPrintConfigPath, Encoding.UTF8).Trim();
+                _autoPrintEnabled = ap != "0";
             }
 
             _db = new PosDatabasePayload();
@@ -198,13 +205,7 @@ namespace EventosPos
                 Padding = new Thickness(12, 6, 12, 6),
                 Margin = new Thickness(0, 0, 12, 0)
             };
-            logoBadge.Child = new TextBlock
-            {
-                Text = "👨‍🍳 COCINA",
-                FontSize = 13,
-                FontWeight = FontWeights.Bold,
-                Foreground = KTheme.Warn
-            };
+            logoBadge.Child = LucideIcons.IconText("chef-hat", "COCINA", 16, KTheme.Warn, 13, FontWeights.Bold);
             leftStack.Children.Add(logoBadge);
 
             var titleStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 18, 0) };
@@ -215,17 +216,18 @@ namespace EventosPos
                 FontWeight = FontWeights.Bold,
                 Foreground = KTheme.Text
             });
-            titleStack.Children.Add(new TextBlock
+            _headerSubtitleText = new TextBlock
             {
                 Text = "Sincronizado por Red Local / Wi-Fi con Caja POS",
                 FontSize = 11,
                 Foreground = KTheme.Muted
-            });
+            };
+            titleStack.Children.Add(_headerSubtitleText);
             leftStack.Children.Add(titleStack);
 
-            _btnTabActive = CreateTabButton("🔥 En Preparación", () => SwitchTab("active"));
+            _btnTabActive = CreateTabButton("En Preparación", "flame", () => SwitchTab("active"));
             _btnTabActive.Margin = new Thickness(0, 0, 6, 0);
-            _btnTabFinished = CreateTabButton("✓ Pedidos Listos", () => SwitchTab("finished"));
+            _btnTabFinished = CreateTabButton("Pedidos Listos", "check", () => SwitchTab("finished"));
             leftStack.Children.Add(_btnTabActive);
             leftStack.Children.Add(_btnTabFinished);
 
@@ -234,50 +236,10 @@ namespace EventosPos
 
             var rightStack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 
-            // Indicador y botón de conexión con la PC de Caja
-            _netStatusBadge = new Border
-            {
-                Background = KTheme.OkBg,
-                BorderBrush = KTheme.Ok,
-                BorderThickness = new Thickness(1),
-                CornerRadius = KTheme.BtnRadius,
-                Padding = new Thickness(10, 6, 10, 6),
-                Margin = new Thickness(0, 0, 6, 0),
-                Cursor = Cursors.Hand,
-                ToolTip = "Hacé clic para configurar la IP de la PC de Caja si están en distintas computadoras"
-            };
-            _netStatusText = new TextBlock
-            {
-                Text = "📡 Buscando Caja...",
-                FontSize = 12,
-                FontWeight = FontWeights.Bold,
-                Foreground = KTheme.Ok
-            };
-            _netStatusBadge.Child = _netStatusText;
-            _netStatusBadge.MouseLeftButtonUp += (s, e) => OpenNetworkConfigModal();
-            rightStack.Children.Add(_netStatusBadge);
-
-            var btnConfigIp = CreateSecondaryButton("📡 Red / IP", OpenNetworkConfigModal);
-            btnConfigIp.Padding = new Thickness(10, 6, 10, 6);
-            btnConfigIp.Margin = new Thickness(0, 0, 6, 0);
-            rightStack.Children.Add(btnConfigIp);
-
-            var btnSettings = CreateSecondaryButton("⚙️ Configuración", OpenKitchenSettingsModal);
-            btnSettings.Padding = new Thickness(10, 6, 10, 6);
+            var btnSettings = CreateSecondaryButton("Configuración", () => OpenKitchenSettingsModal(), "settings");
+            btnSettings.Padding = new Thickness(12, 6, 12, 6);
             btnSettings.Margin = new Thickness(0, 0, 12, 0);
             rightStack.Children.Add(btnSettings);
-
-            _autoPrintCheck = new CheckBox
-            {
-                Content = "🖨️ Auto-imprimir",
-                IsChecked = true,
-                FontSize = 12,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = KTheme.Text,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 12, 0)
-            };
-            rightStack.Children.Add(_autoPrintCheck);
 
             var pillPend = new Border { Background = KTheme.WarnBg, BorderBrush = KTheme.Warn, BorderThickness = new Thickness(1), CornerRadius = KTheme.BtnRadius, Padding = new Thickness(10, 6, 10, 6), Margin = new Thickness(0, 0, 6, 0) };
             _pendingCountText = new TextBlock { Text = "Pendientes: 0", FontSize = 12, FontWeight = FontWeights.Bold, Foreground = KTheme.Warn };
@@ -333,11 +295,11 @@ namespace EventosPos
 
             _btnTabActive.Background = tab == "active" ? KTheme.BrandBg : KTheme.Bg;
             _btnTabActive.BorderBrush = tab == "active" ? KTheme.Brand : KTheme.Border;
-            ((TextBlock)_btnTabActive.Child).Foreground = tab == "active" ? KTheme.BrandDark : KTheme.Muted;
+            _btnTabActive.Child = LucideIcons.IconText("flame", "En Preparación", 14, tab == "active" ? KTheme.BrandDark : KTheme.Muted, 13, FontWeights.Bold);
 
             _btnTabFinished.Background = tab == "finished" ? KTheme.BrandBg : KTheme.Bg;
             _btnTabFinished.BorderBrush = tab == "finished" ? KTheme.Brand : KTheme.Border;
-            ((TextBlock)_btnTabFinished.Child).Foreground = tab == "finished" ? KTheme.BrandDark : KTheme.Muted;
+            _btnTabFinished.Child = LucideIcons.IconText("check", "Pedidos Listos", 14, tab == "finished" ? KTheme.BrandDark : KTheme.Muted, 13, FontWeights.Bold);
         }
 
         private bool TryLoadStateFromCaja(out PosDatabasePayload loadedDb, out string connectionLabel, out bool isRemote)
@@ -355,7 +317,7 @@ namespace EventosPos
                     if (loadedDb != null)
                     {
                         _activeCajaIp = _manualCajaIp;
-                        connectionLabel = "🟢 Caja Red (" + _manualCajaIp + ")";
+                        connectionLabel = "Caja Red (" + _manualCajaIp + ")";
                         isRemote = true;
                         return true;
                     }
@@ -372,7 +334,7 @@ namespace EventosPos
                     if (loadedDb != null)
                     {
                         _activeCajaIp = _discoveredCajaIp;
-                        connectionLabel = "🟢 Caja Wi-Fi (" + _discoveredCajaIp + ")";
+                        connectionLabel = "Caja Wi-Fi (" + _discoveredCajaIp + ")";
                         isRemote = true;
                         return true;
                     }
@@ -387,7 +349,7 @@ namespace EventosPos
                 if (loadedDb != null)
                 {
                     _activeCajaIp = "127.0.0.1";
-                    connectionLabel = "🟢 Caja Conectada (Esta PC)";
+                    connectionLabel = "Caja Conectada (Esta PC)";
                     isRemote = true;
                     return true;
                 }
@@ -399,7 +361,7 @@ namespace EventosPos
             {
                 loadedDb = PosStore.Load();
                 _activeCajaIp = "";
-                connectionLabel = "🟢 Modo Local";
+                connectionLabel = "Modo Local";
                 isRemote = false;
                 return true;
             }
@@ -417,26 +379,37 @@ namespace EventosPos
 
                 if (!TryLoadStateFromCaja(out newDb, out connLabel, out isRemote))
                 {
-                    _netStatusBadge.Background = KTheme.WarnBg;
-                    _netStatusBadge.BorderBrush = KTheme.Warn;
-                    _netStatusText.Foreground = KTheme.Warn;
-                    _netStatusText.Text = "🟠 Buscando PC de Caja...";
+                    _isConnectedToCaja = false;
+                    _currentConnLabel = "Buscando PC de Caja en la red...";
+                    if (_headerSubtitleText != null)
+                    {
+                        _headerSubtitleText.Text = "● Buscando PC de Caja en la red...";
+                        _headerSubtitleText.Foreground = KTheme.Warn;
+                    }
                     return;
                 }
 
                 _db = newDb;
-                _netStatusBadge.Background = KTheme.OkBg;
-                _netStatusBadge.BorderBrush = KTheme.Ok;
-                _netStatusText.Foreground = KTheme.Ok;
-                _netStatusText.Text = connLabel;
+                _isConnectedToCaja = true;
+                _currentConnLabel = connLabel;
+                if (_headerSubtitleText != null)
+                {
+                    _headerSubtitleText.Text = "● " + connLabel + (_autoPrintEnabled ? " · Auto-impresión activa" : "");
+                    _headerSubtitleText.Foreground = KTheme.Muted;
+                }
 
+                bool separateBar = _db.Settings != null && _db.Settings.EnableBarSeparation;
                 var activeOrders = _db.Orders
-                    .Where(o => o.Status == "completado" && (o.KitchenStatus == "pendiente" || o.KitchenStatus == "preparando"))
+                    .Where(o => o.Status == "completado"
+                                && (o.KitchenStatus == "pendiente" || o.KitchenStatus == "preparando")
+                                && (!separateBar || GetKitchenItems(o).Count > 0))
                     .OrderBy(o => o.Id)
                     .ToList();
 
                 var finishedOrders = _db.Orders
-                    .Where(o => o.Status == "completado" && (o.KitchenStatus == "finalizado" || o.KitchenStatus == "entregado"))
+                    .Where(o => o.Status == "completado"
+                                && (o.KitchenStatus == "finalizado" || o.KitchenStatus == "entregado")
+                                && (!separateBar || GetKitchenItems(o).Count > 0))
                     .OrderByDescending(o => o.Id)
                     .Take(30)
                     .ToList();
@@ -459,7 +432,7 @@ namespace EventosPos
                             else
                                 localChanged = true;
 
-                            if (_autoPrintCheck.IsChecked == true)
+                            if (_autoPrintEnabled)
                             {
                                 try { PrintComandaWithKitchenPrinter(ord); } catch { }
                             }
@@ -471,13 +444,16 @@ namespace EventosPos
 
                 int pendCount = activeOrders.Count(o => o.KitchenStatus == "pendiente");
                 int prepCount = activeOrders.Count(o => o.KitchenStatus == "preparando");
-                int doneTotal = _db.Orders.Count(o => o.Status == "completado" && (o.KitchenStatus == "finalizado" || o.KitchenStatus == "entregado"));
+                int doneTotal = _db.Orders.Count(o => o.Status == "completado"
+                    && (o.KitchenStatus == "finalizado" || o.KitchenStatus == "entregado")
+                    && (!separateBar || GetKitchenItems(o).Count > 0));
 
                 _pendingCountText.Text = "Pendientes: " + pendCount;
                 _prepCountText.Text = "Preparando: " + prepCount;
                 _doneCountText.Text = "Listos: " + doneTotal;
 
-                string hash = string.Join("|", activeOrders.Select(o => o.Id + ":" + o.KitchenStatus))
+                string hash = (separateBar ? "SEP|" : "ALL|")
+                              + string.Join("|", activeOrders.Select(o => o.Id + ":" + o.KitchenStatus))
                               + "##" + string.Join("|", finishedOrders.Select(o => o.Id));
                 if (hash != _lastRenderHash)
                 {
@@ -489,6 +465,14 @@ namespace EventosPos
             catch { }
         }
 
+        private List<OrderLineItem> GetKitchenItems(OrderRecord order)
+        {
+            if (order == null || order.Items == null) return new List<OrderLineItem>();
+            if (_db != null && _db.Settings != null && _db.Settings.EnableBarSeparation)
+                return order.Items.Where(i => !string.Equals(i.PrepStation, "Barra", StringComparison.OrdinalIgnoreCase)).ToList();
+            return order.Items;
+        }
+
         private void PrintComandaWithKitchenPrinter(OrderRecord order)
         {
             var printSettings = new PosSettings
@@ -496,7 +480,8 @@ namespace EventosPos
                 EventName = _db.Settings != null ? _db.Settings.EventName : "Cocina",
                 PaperWidthMm = _db.Settings != null ? _db.Settings.PaperWidthMm : 80,
                 PrinterName = string.IsNullOrWhiteSpace(_localKitchenPrinter) ? EscPosPrinter.DetectPreferredPrinter() : _localKitchenPrinter,
-                PrintDoubleTicket = false
+                PrintDoubleTicket = false,
+                EnableBarSeparation = _db.Settings != null && _db.Settings.EnableBarSeparation
             };
             EscPosPrinter.PrintOrder(order, printSettings, true);
         }
@@ -506,8 +491,8 @@ namespace EventosPos
             var win = new Window
             {
                 Title = "Configuración de Cocina",
-                Width = 460,
-                Height = 290,
+                Width = 490,
+                Height = 510,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Owner = this,
                 Background = KTheme.Card,
@@ -518,32 +503,130 @@ namespace EventosPos
             var stack = new StackPanel { Margin = new Thickness(22) };
             stack.Children.Add(new TextBlock
             {
-                Text = "⚙️ Configuración de Impresora de Cocina",
-                FontSize = 17,
+                Text = "Configuración de Cocina",
+                FontSize = 18,
+                FontWeight = FontWeights.Bold,
+                Foreground = KTheme.Text,
+                Margin = new Thickness(0, 0, 0, 14)
+            });
+
+            // 1. Bloque de Red Local / Conexión con Caja
+            var netCard = new Border
+            {
+                Background = KTheme.Bg,
+                BorderBrush = KTheme.Border,
+                BorderThickness = new Thickness(1),
+                CornerRadius = KTheme.CardRadius,
+                Padding = new Thickness(14, 12, 14, 12),
+                Margin = new Thickness(0, 0, 0, 14)
+            };
+            var netStack = new StackPanel();
+            netStack.Children.Add(new TextBlock
+            {
+                Text = "Conexión con PC de Caja (Red Local / Wi-Fi)",
+                FontSize = 13,
                 FontWeight = FontWeights.Bold,
                 Foreground = KTheme.Text,
                 Margin = new Thickness(0, 0, 0, 6)
             });
-            stack.Children.Add(new TextBlock
+
+            var statusPill = new Border
             {
-                Text = "Elegí la ticketera conectada a esta PC para imprimir las comandas de cocina:",
+                Background = _isConnectedToCaja ? KTheme.OkBg : KTheme.WarnBg,
+                BorderBrush = _isConnectedToCaja ? KTheme.Ok : KTheme.Warn,
+                BorderThickness = new Thickness(1),
+                CornerRadius = KTheme.BtnRadius,
+                Padding = new Thickness(10, 5, 10, 5),
+                Margin = new Thickness(0, 0, 0, 10),
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            statusPill.Child = new TextBlock
+            {
+                Text = _currentConnLabel,
                 FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = _isConnectedToCaja ? KTheme.Ok : KTheme.Warn
+            };
+            netStack.Children.Add(statusPill);
+
+            netStack.Children.Add(new TextBlock
+            {
+                Text = "IP de la PC de Caja (dejá vacío para detección automática por Wi-Fi):",
+                FontSize = 11,
                 Foreground = KTheme.Muted,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 14)
+                Margin = new Thickness(0, 0, 0, 4)
             });
 
-            var printerCombo = new ComboBox { Padding = new Thickness(10, 7, 10, 7), FontSize = 13, Margin = new Thickness(0, 0, 0, 18) };
+            var ipRow = new DockPanel();
+            var ipBox = new TextBox
+            {
+                Padding = new Thickness(10, 6, 10, 6),
+                FontSize = 13,
+                FontWeight = FontWeights.Bold,
+                Background = KTheme.Card,
+                BorderBrush = KTheme.BorderStrong,
+                BorderThickness = new Thickness(1),
+                Text = string.IsNullOrWhiteSpace(_manualCajaIp) ? _discoveredCajaIp : _manualCajaIp
+            };
+            var btnClearIp = CreateSecondaryButton("Detectar Auto", () =>
+            {
+                ipBox.Text = "";
+                _manualCajaIp = "";
+                if (File.Exists(_ipConfigPath)) File.Delete(_ipConfigPath);
+            });
+            btnClearIp.Padding = new Thickness(10, 6, 10, 6);
+            btnClearIp.Margin = new Thickness(8, 0, 0, 0);
+            DockPanel.SetDock(btnClearIp, Dock.Right);
+            ipRow.Children.Add(btnClearIp);
+            ipRow.Children.Add(ipBox);
+            netStack.Children.Add(ipRow);
+            netCard.Child = netStack;
+            stack.Children.Add(netCard);
+
+            // 2. Bloque de Impresora y Auto-impresión
+            var prCard = new Border
+            {
+                Background = KTheme.Bg,
+                BorderBrush = KTheme.Border,
+                BorderThickness = new Thickness(1),
+                CornerRadius = KTheme.CardRadius,
+                Padding = new Thickness(14, 12, 14, 12),
+                Margin = new Thickness(0, 0, 0, 16)
+            };
+            var prStack = new StackPanel();
+            prStack.Children.Add(new TextBlock
+            {
+                Text = "Impresora de Comandas",
+                FontSize = 13,
+                FontWeight = FontWeights.Bold,
+                Foreground = KTheme.Text,
+                Margin = new Thickness(0, 0, 0, 6)
+            });
+
+            var printerCombo = new ComboBox { Padding = new Thickness(10, 7, 10, 7), FontSize = 13, Margin = new Thickness(0, 0, 0, 12) };
             foreach (var p in EscPosPrinter.ListInstalledPrinters())
                 printerCombo.Items.Add(p);
 
             printerCombo.SelectedItem = _localKitchenPrinter;
             if (printerCombo.SelectedItem == null && printerCombo.Items.Count > 0)
                 printerCombo.SelectedIndex = 0;
-            stack.Children.Add(printerCombo);
+            prStack.Children.Add(printerCombo);
 
+            var chkAutoPrint = new CheckBox
+            {
+                Content = "Imprimir comanda automáticamente al recibir cada pedido",
+                IsChecked = _autoPrintEnabled,
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = KTheme.Text
+            };
+            prStack.Children.Add(chkAutoPrint);
+            prCard.Child = prStack;
+            stack.Children.Add(prCard);
+
+            // Botones finales
             var btnsRow = new UniformGrid { Columns = 2 };
-            var btnTest = CreateSecondaryButton("🖨️ Imprimir Prueba", () =>
+            var btnTest = CreateSecondaryButton("Imprimir Prueba", () =>
             {
                 if (printerCombo.SelectedItem != null)
                 {
@@ -564,100 +647,34 @@ namespace EventosPos
             btnTest.Margin = new Thickness(0, 0, 8, 0);
             btnsRow.Children.Add(btnTest);
 
-            var btnSave = CreateSuccessButton("✓ Guardar Impresora", () =>
+            var btnSave = CreateSuccessButton("Guardar Configuración", () =>
             {
+                _manualCajaIp = ipBox.Text.Trim();
+                if (string.IsNullOrEmpty(_manualCajaIp))
+                {
+                    if (File.Exists(_ipConfigPath)) File.Delete(_ipConfigPath);
+                }
+                else
+                {
+                    File.WriteAllText(_ipConfigPath, _manualCajaIp, Encoding.UTF8);
+                }
+
                 if (printerCombo.SelectedItem != null)
                 {
                     _localKitchenPrinter = printerCombo.SelectedItem.ToString();
                     File.WriteAllText(_printerConfigPath, _localKitchenPrinter, Encoding.UTF8);
                 }
+
+                _autoPrintEnabled = chkAutoPrint.IsChecked == true;
+                File.WriteAllText(_autoPrintConfigPath, _autoPrintEnabled ? "1" : "0", Encoding.UTF8);
+
+                _lastRenderHash = "";
+                PollOrders();
                 win.Close();
             });
             btnsRow.Children.Add(btnSave);
             stack.Children.Add(btnsRow);
 
-            win.Content = stack;
-            win.ShowDialog();
-        }
-
-        private void OpenNetworkConfigModal()
-        {
-            var win = new Window
-            {
-                Title = "Conexión en Red con PC de Caja",
-                Width = 450,
-                Height = 330,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                Owner = this,
-                Background = KTheme.Card,
-                ResizeMode = ResizeMode.NoResize,
-                FontFamily = new FontFamily("Segoe UI")
-            };
-
-            var stack = new StackPanel { Margin = new Thickness(22) };
-            stack.Children.Add(new TextBlock
-            {
-                Text = "📡 Conectar Cocina con otra PC (Caja)",
-                FontSize = 17,
-                FontWeight = FontWeights.Bold,
-                Foreground = KTheme.Text,
-                Margin = new Thickness(0, 0, 0, 8)
-            });
-
-            stack.Children.Add(new TextBlock
-            {
-                Text = "Si Caja y Cocina están en distintas PCs conectadas al mismo Wi-Fi o Router, el programa detecta la Caja automáticamente.\nTambién podés escribir abajo la 'IP Caja' que figura arriba a la derecha en el programa de Caja:",
-                FontSize = 12,
-                Foreground = KTheme.Muted,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 14)
-            });
-
-            stack.Children.Add(new TextBlock
-            {
-                Text = "IP de la PC de Caja (dejar vacío para detección automática):",
-                FontSize = 12,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = KTheme.Text,
-                Margin = new Thickness(0, 0, 0, 4)
-            });
-
-            var ipBox = new TextBox
-            {
-                Padding = new Thickness(10, 7, 10, 7),
-                FontSize = 14,
-                FontWeight = FontWeights.Bold,
-                Background = KTheme.Bg,
-                BorderBrush = KTheme.BorderStrong,
-                BorderThickness = new Thickness(1),
-                Text = string.IsNullOrWhiteSpace(_manualCajaIp) ? _discoveredCajaIp : _manualCajaIp
-            };
-            stack.Children.Add(ipBox);
-
-            var btnsRow = new UniformGrid { Columns = 2, Margin = new Thickness(0, 18, 0, 0) };
-
-            var btnAuto = CreateSecondaryButton("🔄 Detectar Automático", () =>
-            {
-                _manualCajaIp = "";
-                if (File.Exists(_ipConfigPath)) File.Delete(_ipConfigPath);
-                _lastRenderHash = "";
-                PollOrders();
-                win.Close();
-            });
-            btnAuto.Margin = new Thickness(0, 0, 6, 0);
-            btnsRow.Children.Add(btnAuto);
-
-            var btnConnect = CreateSuccessButton("✓ Conectar a esta IP", () =>
-            {
-                _manualCajaIp = ipBox.Text.Trim();
-                File.WriteAllText(_ipConfigPath, _manualCajaIp, Encoding.UTF8);
-                _lastRenderHash = "";
-                PollOrders();
-                win.Close();
-            });
-            btnsRow.Children.Add(btnConnect);
-
-            stack.Children.Add(btnsRow);
             win.Content = stack;
             win.ShowDialog();
         }
@@ -682,7 +699,7 @@ namespace EventosPos
                 var st = new StackPanel();
                 st.Children.Add(new TextBlock
                 {
-                    Text = "✓ No hay pedidos pendientes en Cocina",
+                    Text = "No hay pedidos pendientes en Cocina",
                     FontSize = 18,
                     FontWeight = FontWeights.Bold,
                     Foreground = KTheme.Text
@@ -730,7 +747,7 @@ namespace EventosPos
                 };
                 statusBadge.Child = new TextBlock
                 {
-                    Text = isPrep ? "👨‍🍳 EN PREPARACIÓN" : "🔔 NUEVO PEDIDO",
+                    Text = isPrep ? "EN PREPARACIÓN" : "NUEVO PEDIDO",
                     FontSize = 11,
                     FontWeight = FontWeights.Bold,
                     Foreground = isPrep ? KTheme.BrandDark : KTheme.Warn
@@ -767,7 +784,7 @@ namespace EventosPos
                     Margin = new Thickness(0, 0, 0, 10)
                 };
                 var itemsStack = new StackPanel();
-                foreach (var it in ord.Items)
+                foreach (var it in GetKitchenItems(ord))
                 {
                     var itemRow = new DockPanel { Margin = new Thickness(0, 3, 0, 3) };
                     var qtyBadge = new Border
@@ -815,7 +832,7 @@ namespace EventosPos
                     {
                         itemTextStack.Children.Add(new TextBlock
                         {
-                            Text = "✏️ " + it.Note,
+                            Text = "" + it.Note,
                             FontSize = 12,
                             FontWeight = FontWeights.Bold,
                             Foreground = KTheme.Brand,
@@ -842,7 +859,7 @@ namespace EventosPos
                     };
                     noteBorder.Child = new TextBlock
                     {
-                        Text = "📝 NOTA: " + ord.Notes,
+                        Text = "NOTA: " + ord.Notes,
                         FontSize = 13,
                         FontWeight = FontWeights.Bold,
                         Foreground = KTheme.Warn,
@@ -854,24 +871,24 @@ namespace EventosPos
                 var actionsDock = new DockPanel();
                 var ordCopy = ord;
 
-                var btnPrint = CreateSecondaryButton("🖨️", () =>
+                var btnPrint = CreateSecondaryButton("", () =>
                 {
                     try { PrintComandaWithKitchenPrinter(ordCopy); }
                     catch (Exception ex) { MessageBox.Show(ex.Message, "Ticketera", MessageBoxButton.OK, MessageBoxImage.Error); }
-                });
+                }, "printer");
                 btnPrint.Margin = new Thickness(0, 0, 6, 0);
                 DockPanel.SetDock(btnPrint, Dock.Left);
                 actionsDock.Children.Add(btnPrint);
 
                 if (!isPrep)
                 {
-                    var btnPrep = CreateSecondaryButton("👨‍🍳 Preparar", () => SetOrderStatus(ordCopy.Id, "preparando"));
+                    var btnPrep = CreateSecondaryButton("Preparar", () => SetOrderStatus(ordCopy.Id, "preparando"), "chef-hat");
                     btnPrep.Margin = new Thickness(0, 0, 6, 0);
                     DockPanel.SetDock(btnPrep, Dock.Left);
                     actionsDock.Children.Add(btnPrep);
                 }
 
-                var btnDone = CreateSuccessButton("✓ PEDIDO LISTO", () => SetOrderStatus(ordCopy.Id, "finalizado"));
+                var btnDone = CreateSuccessButton("PEDIDO LISTO", () => SetOrderStatus(ordCopy.Id, "finalizado"), "check");
                 actionsDock.Children.Add(btnDone);
 
                 stack.Children.Add(actionsDock);
@@ -909,13 +926,13 @@ namespace EventosPos
 
                 var dock = new DockPanel();
                 var ordCopy = ord;
-                var btnReopen = CreateSecondaryButton("↩ Volver a Pendiente", () => SetOrderStatus(ordCopy.Id, "pendiente"));
+                var btnReopen = CreateSecondaryButton("Volver a Pendiente", () => SetOrderStatus(ordCopy.Id, "pendiente"), "rotate-ccw");
                 DockPanel.SetDock(btnReopen, Dock.Right);
                 dock.Children.Add(btnReopen);
 
                 string finTime = (ord.FinishedAt ?? "").Length >= 5 ? ord.FinishedAt.Substring(0, 5) : (ord.FinishedAt ?? "");
                 string stateLabel = ord.KitchenStatus == "entregado" ? "Entregado por Caja" : ("Listo en Cocina " + finTime).Trim();
-                string summary = string.Join(", ", ord.Items.Select(i => i.Quantity + "x " + i.ProductName));
+                string summary = string.Join(", ", GetKitchenItems(ord).Select(i => i.Quantity + "x " + i.ProductName));
                 dock.Children.Add(new TextBlock
                 {
                     Text = string.Format("PEDIDO #{0:000}   ·   {1}   ·   {2}",
@@ -961,7 +978,7 @@ namespace EventosPos
             PollOrders();
         }
 
-        private Border CreateTabButton(string text, Action onClick)
+        private Border CreateTabButton(string text, string lucideIcon, Action onClick)
         {
             var b = new Border
             {
@@ -972,12 +989,12 @@ namespace EventosPos
                 Padding = new Thickness(14, 7, 14, 7),
                 Cursor = Cursors.Hand
             };
-            b.Child = new TextBlock { Text = text, FontSize = 13, FontWeight = FontWeights.Bold, Foreground = KTheme.Muted };
+            b.Child = LucideIcons.IconText(lucideIcon, text, 14, KTheme.Muted, 13, FontWeights.Bold);
             b.MouseLeftButtonUp += (s, e) => onClick();
             return b;
         }
 
-        private Border CreateSecondaryButton(string text, Action onClick)
+        private Border CreateSecondaryButton(string text, Action onClick, string lucideIcon = null)
         {
             var b = new Border
             {
@@ -988,21 +1005,17 @@ namespace EventosPos
                 Padding = new Thickness(12, 9, 12, 9),
                 Cursor = Cursors.Hand
             };
-            b.Child = new TextBlock
-            {
-                Text = text,
-                FontSize = 12,
-                FontWeight = FontWeights.Bold,
-                Foreground = KTheme.Text,
-                HorizontalAlignment = HorizontalAlignment.Center
-            };
+            if (!string.IsNullOrEmpty(lucideIcon))
+                b.Child = LucideIcons.IconText(lucideIcon, text, 14, KTheme.Text, 12, FontWeights.Bold);
+            else
+                b.Child = new TextBlock { Text = text, FontSize = 12, FontWeight = FontWeights.Bold, Foreground = KTheme.Text, HorizontalAlignment = HorizontalAlignment.Center };
             b.MouseEnter += (s, e) => b.Background = KTheme.Hover;
             b.MouseLeave += (s, e) => b.Background = KTheme.Card;
             b.MouseLeftButtonUp += (s, e) => onClick();
             return b;
         }
 
-        private Border CreateSuccessButton(string text, Action onClick)
+        private Border CreateSuccessButton(string text, Action onClick, string lucideIcon = null)
         {
             var b = new Border
             {
@@ -1011,14 +1024,10 @@ namespace EventosPos
                 Padding = new Thickness(14, 9, 14, 9),
                 Cursor = Cursors.Hand
             };
-            b.Child = new TextBlock
-            {
-                Text = text,
-                FontSize = 13,
-                FontWeight = FontWeights.Bold,
-                Foreground = Brushes.White,
-                HorizontalAlignment = HorizontalAlignment.Center
-            };
+            if (!string.IsNullOrEmpty(lucideIcon))
+                b.Child = LucideIcons.IconText(lucideIcon, text, 15, Brushes.White, 13, FontWeights.Bold);
+            else
+                b.Child = new TextBlock { Text = text, FontSize = 13, FontWeight = FontWeights.Bold, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center };
             b.MouseEnter += (s, e) => b.Opacity = 0.9;
             b.MouseLeave += (s, e) => b.Opacity = 1.0;
             b.MouseLeftButtonUp += (s, e) => onClick();

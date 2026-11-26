@@ -1,4 +1,4 @@
 {
-  "version": "1.0.5",
-  "notes": "Selector de cantidad de copias del ticket de cliente (1 a 4), doble talón opcional en Caja con selección de ticketera independiente para cocina, y auto-impresión activada por defecto en Cocina_POS."
+  "version": "1.0.8",
+  "notes": "Iconografía 100% Lucide, modo Multi-Caja (Principal/Secundaria) y separación configurable de comandas entre Cocina y Barra (0 a 2 tickets de Barra con impresora propia)."
 }

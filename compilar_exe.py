@@ -9,6 +9,7 @@ WPF_DIR = r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF"
 def compile_wpf_exe(exe_name: str, entry_cs: str):
     out_exe = os.path.join(BASE_DIR, exe_name)
     core_cs = os.path.join(BASE_DIR, "src", "PosCore.cs")
+    icons_cs = os.path.join(BASE_DIR, "src", "LucideIcons.cs")
     main_cs = os.path.join(BASE_DIR, "src", entry_cs)
 
     cmd = [
@@ -26,6 +27,7 @@ def compile_wpf_exe(exe_name: str, entry_cs: str):
         "/r:System.Printing.dll",
         "/r:System.Web.Extensions.dll",
         core_cs,
+        icons_cs,
         main_cs,
     ]
     res = subprocess.run(cmd, capture_output=True, text=True)
