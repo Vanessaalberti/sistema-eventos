@@ -202,6 +202,9 @@ namespace EventosPos
             _syncTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             _syncTimer.Tick += (s, e) => BackgroundSync();
             _syncTimer.Start();
+
+            // Verificar automáticamente actualizaciones en GitHub al abrir (en segundo plano)
+            Loaded += (s, e) => GitHubUpdater.CheckForUpdatesAsync(this, "Caja_POS.exe", false);
         }
 
         private void OnWindowKeyDown(object sender, KeyEventArgs e)
@@ -2811,7 +2814,14 @@ namespace EventosPos
                     MessageBox.Show(ex.Message, "Error en Ticketera", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             });
+            btnTest.Margin = new Thickness(0, 0, 10, 0);
             btnsRow.Children.Add(btnTest);
+
+            var btnCheckUpdates = CreateGhostButton("🔄 Buscar Actualizaciones (v" + GitHubUpdater.AppVersion + ")", () =>
+            {
+                GitHubUpdater.CheckForUpdatesAsync(this, "Caja_POS.exe", true);
+            });
+            btnsRow.Children.Add(btnCheckUpdates);
             stack.Children.Add(btnsRow);
 
             card.Child = stack;

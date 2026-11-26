@@ -1,15 +1,18 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
+using System.Windows;
 
 namespace EventosPos
 {
@@ -1044,6 +1047,197 @@ namespace EventosPos
             {
                 ClosePrinter(hPrinter);
             }
+        }
+    }
+
+    // =========================================================================
+    // AUTO-ACTUALIZADOR DIRECTO DESDE GITHUB (ESTILO PROCESADORFICHADAS)
+    // Verifica version.json en main de Vanessaalberti/sistema-eventos al abrir.
+    // Si hay nueva versión, descarga el .exe (~120 KB), lo reemplaza y reinicia.
+    // =========================================================================
+    public class RemoteVersionInfo
+    {
+        public string version { get; set; }
+        public string notes { get; set; }
+    }
+
+    public static class GitHubUpdater
+    {
+        public const string AppVersion = "1.0.0";
+        public const string GitHubRepo = "Vanessaalberti/sistema-eventos";
+
+        private static Version ParseVersionSafe(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return new Version(0, 0, 0);
+            string cleaned = raw.Trim().TrimStart('v', 'V');
+            string[] parts = cleaned.Split('.');
+            int maj = 0, min = 0, build = 0;
+            if (parts.Length > 0) int.TryParse(parts[0], out maj);
+            if (parts.Length > 1) int.TryParse(parts[1], out min);
+            if (parts.Length > 2) int.TryParse(parts[2], out build);
+            return new Version(maj, min, build);
+        }
+
+        public static void CheckForUpdatesAsync(Window ownerWindow, string exeFileName, bool notifyIfUpToDate)
+        {
+            var th = new Thread(() =>
+            {
+                try
+                {
+                    // Habilitar TLS 1.2 para conexiones HTTPS con GitHub en .NET Framework 4
+                    ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | SecurityProtocolType.Tls12;
+                    long ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                    string rawBase = "https://raw.githubusercontent.com/" + GitHubRepo + "/main";
+                    string versionUrl = rawBase + "/version.json?t=" + ts;
+
+                    string jsonText = DownloadStringWithTimeout(versionUrl, 5000);
+                    if (string.IsNullOrWhiteSpace(jsonText))
+                    {
+                        if (notifyIfUpToDate)
+                            ownerWindow.Dispatcher.BeginInvoke(new Action(() =>
+                                MessageBox.Show(ownerWindow, "No se pudo consultar GitHub (verificá tu conexión a internet).", "Actualizaciones", MessageBoxButton.OK, MessageBoxImage.Information)));
+                        return;
+                    }
+
+                    var ser = new JavaScriptSerializer();
+                    var remote = ser.Deserialize<RemoteVersionInfo>(jsonText);
+                    if (remote == null || string.IsNullOrWhiteSpace(remote.version))
+                        return;
+
+                    Version vLocal = ParseVersionSafe(AppVersion);
+                    Version vRemote = ParseVersionSafe(remote.version);
+
+                    if (vRemote <= vLocal)
+                    {
+                        if (notifyIfUpToDate)
+                            ownerWindow.Dispatcher.BeginInvoke(new Action(() =>
+                                MessageBox.Show(ownerWindow,
+                                    "Ya tenés la última versión instalada (v" + AppVersion + ").",
+                                    "Sistema Actualizado",
+                                    MessageBoxButton.OK,
+                                    MessageBoxImage.Information)));
+                        return;
+                    }
+
+                    string downloadUrl = rawBase + "/" + exeFileName + "?t=" + ts;
+                    string notesText = string.IsNullOrWhiteSpace(remote.notes) ? "Mejoras y correcciones generales." : remote.notes;
+
+                    ownerWindow.Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        var res = MessageBox.Show(
+                            ownerWindow,
+                            string.Format(
+                                "Hay una nueva actualización disponible en GitHub (v{0}).\n" +
+                                "Versión actual: v{1}\n\n" +
+                                "Novedades:\n• {2}\n\n" +
+                                "La actualización es instantánea (~120 KB) y no borra tus datos ni tus cajas.\n" +
+                                "¿Querés actualizar y reiniciar el programa ahora?",
+                                remote.version, AppVersion, notesText),
+                            "Actualización Disponible",
+                            MessageBoxButton.YesNo,
+                            MessageBoxImage.Information);
+
+                        if (res == MessageBoxResult.Yes)
+                        {
+                            DownloadAndSwapExeAsync(ownerWindow, downloadUrl);
+                        }
+                    }));
+                }
+                catch
+                {
+                    if (notifyIfUpToDate)
+                    {
+                        try
+                        {
+                            ownerWindow.Dispatcher.BeginInvoke(new Action(() =>
+                                MessageBox.Show(ownerWindow, "No se pudo conectar con GitHub en este momento (modo sin internet).", "Actualizaciones", MessageBoxButton.OK, MessageBoxImage.Information)));
+                        }
+                        catch { }
+                    }
+                }
+            });
+            th.IsBackground = true;
+            th.Start();
+        }
+
+        private static string DownloadStringWithTimeout(string url, int timeoutMs)
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.Timeout = timeoutMs;
+            req.ReadWriteTimeout = timeoutMs;
+            req.UserAgent = "EventosPOS-Updater/1.0";
+            req.Headers.Add("Cache-Control", "no-cache");
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            {
+                if (resp.StatusCode != HttpStatusCode.OK) return null;
+                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                    return sr.ReadToEnd();
+            }
+        }
+
+        private static void DownloadAndSwapExeAsync(Window ownerWindow, string downloadUrl)
+        {
+            var th = new Thread(() =>
+            {
+                try
+                {
+                    ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | SecurityProtocolType.Tls12;
+                    string currentExe = Assembly.GetEntryAssembly().Location;
+                    string exeDir = Path.GetDirectoryName(currentExe);
+                    string tempExe = Path.Combine(exeDir, "update_temp.exe");
+                    string updaterBat = Path.Combine(exeDir, "updater_pos.bat");
+
+                    var req = (HttpWebRequest)WebRequest.Create(downloadUrl);
+                    req.Timeout = 15000;
+                    req.UserAgent = "EventosPOS-Updater/1.0";
+                    using (var resp = (HttpWebResponse)req.GetResponse())
+                    using (var netStream = resp.GetResponseStream())
+                    using (var fs = new FileStream(tempExe, FileMode.Create, FileAccess.Write))
+                    {
+                        netStream.CopyTo(fs);
+                    }
+
+                    // Validar cabecera PE ('MZ') y tamaño mínimo para seguridad
+                    byte[] header = new byte[2];
+                    using (var fs = File.OpenRead(tempExe))
+                    {
+                        if (fs.Length < 20000 || fs.Read(header, 0, 2) < 2 || header[0] != 0x4D || header[1] != 0x5A)
+                            throw new Exception("El archivo descargado no es un ejecutable válido.");
+                    }
+
+                    // Script temporal oculto que reemplaza el .exe y lo vuelve a abrir automáticamente
+                    string batContent =
+                        "@echo off\r\n" +
+                        "timeout /t 2 /nobreak > NUL\r\n" +
+                        "move /y \"" + tempExe + "\" \"" + currentExe + "\" > NUL\r\n" +
+                        "start \"\" \"" + currentExe + "\"\r\n" +
+                        "del \"%~f0\"\r\n";
+
+                    File.WriteAllText(updaterBat, batContent, Encoding.Default);
+
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = "cmd.exe",
+                        Arguments = "/c \"" + updaterBat + "\"",
+                        WorkingDirectory = exeDir,
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    };
+                    Process.Start(psi);
+
+                    ownerWindow.Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        Application.Current.Shutdown();
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    ownerWindow.Dispatcher.BeginInvoke(new Action(() =>
+                        MessageBox.Show(ownerWindow, "No se pudo aplicar la actualización:\n" + ex.Message, "Error al actualizar", MessageBoxButton.OK, MessageBoxImage.Error)));
+                }
+            });
+            th.IsBackground = true;
+            th.Start();
         }
     }
 }

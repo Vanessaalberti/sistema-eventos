@@ -122,6 +122,9 @@ namespace EventosPos
             _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
             _pollTimer.Tick += (s, e) => PollOrders();
             _pollTimer.Start();
+
+            // Verificar automáticamente actualizaciones en GitHub al abrir (en segundo plano)
+            Loaded += (s, e) => GitHubUpdater.CheckForUpdatesAsync(this, "Cocina_POS.exe", false);
         }
 
         private void StartUdpAutoDiscoveryListener()
