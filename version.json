@@ -1,4 +1,4 @@
 {
-  "version": "1.0.1",
-  "notes": "Nueva estética visual moderna en español, tarjetas horizontales con selector rápido +/- y comentarios por artículo (lápiz) visibles en ticket y comanda de cocina."
+  "version": "1.0.5",
+  "notes": "Selector de cantidad de copias del ticket de cliente (1 a 4), doble talón opcional en Caja con selección de ticketera independiente para cocina, y auto-impresión activada por defecto en Cocina_POS."
 }

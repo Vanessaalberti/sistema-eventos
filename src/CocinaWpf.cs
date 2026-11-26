@@ -72,8 +72,10 @@ namespace EventosPos
         private volatile string _discoveredCajaIp = "";
         private string _manualCajaIp = "";
         private string _activeCajaIp = ""; // IP remota conectada actualmente (vacío si lee local en la misma PC)
+        private string _localKitchenPrinter = "";
         private bool _isListeningUdp = true;
         private readonly string _ipConfigPath = Path.Combine(PosStore.DataDir, "cocina_ip.txt");
+        private readonly string _printerConfigPath = Path.Combine(PosStore.DataDir, "cocina_printer.txt");
 
         private Border _netStatusBadge;
         private TextBlock _netStatusText;
@@ -96,6 +98,14 @@ namespace EventosPos
             if (File.Exists(_ipConfigPath))
             {
                 _manualCajaIp = File.ReadAllText(_ipConfigPath, Encoding.UTF8).Trim();
+            }
+            if (File.Exists(_printerConfigPath))
+            {
+                _localKitchenPrinter = File.ReadAllText(_printerConfigPath, Encoding.UTF8).Trim();
+            }
+            if (string.IsNullOrWhiteSpace(_localKitchenPrinter))
+            {
+                _localKitchenPrinter = EscPosPrinter.DetectPreferredPrinter();
             }
 
             _db = new PosDatabasePayload();
@@ -215,7 +225,7 @@ namespace EventosPos
 
             _btnTabActive = CreateTabButton("🔥 En Preparación", () => SwitchTab("active"));
             _btnTabActive.Margin = new Thickness(0, 0, 6, 0);
-            _btnTabFinished = CreateTabButton("✓ Últimos Entregados", () => SwitchTab("finished"));
+            _btnTabFinished = CreateTabButton("✓ Pedidos Listos", () => SwitchTab("finished"));
             leftStack.Children.Add(_btnTabActive);
             leftStack.Children.Add(_btnTabFinished);
 
@@ -247,15 +257,20 @@ namespace EventosPos
             _netStatusBadge.MouseLeftButtonUp += (s, e) => OpenNetworkConfigModal();
             rightStack.Children.Add(_netStatusBadge);
 
-            var btnConfigIp = CreateSecondaryButton("⚙️ Red / IP", OpenNetworkConfigModal);
+            var btnConfigIp = CreateSecondaryButton("📡 Red / IP", OpenNetworkConfigModal);
             btnConfigIp.Padding = new Thickness(10, 6, 10, 6);
-            btnConfigIp.Margin = new Thickness(0, 0, 12, 0);
+            btnConfigIp.Margin = new Thickness(0, 0, 6, 0);
             rightStack.Children.Add(btnConfigIp);
+
+            var btnSettings = CreateSecondaryButton("⚙️ Configuración", OpenKitchenSettingsModal);
+            btnSettings.Padding = new Thickness(10, 6, 10, 6);
+            btnSettings.Margin = new Thickness(0, 0, 12, 0);
+            rightStack.Children.Add(btnSettings);
 
             _autoPrintCheck = new CheckBox
             {
                 Content = "🖨️ Auto-imprimir",
-                IsChecked = false,
+                IsChecked = true,
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = KTheme.Text,
@@ -275,7 +290,7 @@ namespace EventosPos
             rightStack.Children.Add(pillPrep);
 
             var pillDone = new Border { Background = KTheme.OkBg, BorderBrush = KTheme.Ok, BorderThickness = new Thickness(1), CornerRadius = KTheme.BtnRadius, Padding = new Thickness(10, 6, 10, 6) };
-            _doneCountText = new TextBlock { Text = "Entregados: 0", FontSize = 12, FontWeight = FontWeights.Bold, Foreground = KTheme.Ok };
+            _doneCountText = new TextBlock { Text = "Listos: 0", FontSize = 12, FontWeight = FontWeights.Bold, Foreground = KTheme.Ok };
             pillDone.Child = _doneCountText;
             rightStack.Children.Add(pillDone);
 
@@ -421,7 +436,7 @@ namespace EventosPos
                     .ToList();
 
                 var finishedOrders = _db.Orders
-                    .Where(o => o.Status == "completado" && o.KitchenStatus == "finalizado")
+                    .Where(o => o.Status == "completado" && (o.KitchenStatus == "finalizado" || o.KitchenStatus == "entregado"))
                     .OrderByDescending(o => o.Id)
                     .Take(30)
                     .ToList();
@@ -446,7 +461,7 @@ namespace EventosPos
 
                             if (_autoPrintCheck.IsChecked == true)
                             {
-                                try { EscPosPrinter.PrintOrder(ord, _db.Settings, true); } catch { }
+                                try { PrintComandaWithKitchenPrinter(ord); } catch { }
                             }
                         }
                     }
@@ -456,11 +471,11 @@ namespace EventosPos
 
                 int pendCount = activeOrders.Count(o => o.KitchenStatus == "pendiente");
                 int prepCount = activeOrders.Count(o => o.KitchenStatus == "preparando");
-                int doneTotal = _db.Orders.Count(o => o.Status == "completado" && o.KitchenStatus == "finalizado");
+                int doneTotal = _db.Orders.Count(o => o.Status == "completado" && (o.KitchenStatus == "finalizado" || o.KitchenStatus == "entregado"));
 
                 _pendingCountText.Text = "Pendientes: " + pendCount;
                 _prepCountText.Text = "Preparando: " + prepCount;
-                _doneCountText.Text = "Entregados: " + doneTotal;
+                _doneCountText.Text = "Listos: " + doneTotal;
 
                 string hash = string.Join("|", activeOrders.Select(o => o.Id + ":" + o.KitchenStatus))
                               + "##" + string.Join("|", finishedOrders.Select(o => o.Id));
@@ -472,6 +487,97 @@ namespace EventosPos
                 }
             }
             catch { }
+        }
+
+        private void PrintComandaWithKitchenPrinter(OrderRecord order)
+        {
+            var printSettings = new PosSettings
+            {
+                EventName = _db.Settings != null ? _db.Settings.EventName : "Cocina",
+                PaperWidthMm = _db.Settings != null ? _db.Settings.PaperWidthMm : 80,
+                PrinterName = string.IsNullOrWhiteSpace(_localKitchenPrinter) ? EscPosPrinter.DetectPreferredPrinter() : _localKitchenPrinter,
+                PrintDoubleTicket = false
+            };
+            EscPosPrinter.PrintOrder(order, printSettings, true);
+        }
+
+        private void OpenKitchenSettingsModal()
+        {
+            var win = new Window
+            {
+                Title = "Configuración de Cocina",
+                Width = 460,
+                Height = 290,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                Background = KTheme.Card,
+                ResizeMode = ResizeMode.NoResize,
+                FontFamily = new FontFamily("Segoe UI")
+            };
+
+            var stack = new StackPanel { Margin = new Thickness(22) };
+            stack.Children.Add(new TextBlock
+            {
+                Text = "⚙️ Configuración de Impresora de Cocina",
+                FontSize = 17,
+                FontWeight = FontWeights.Bold,
+                Foreground = KTheme.Text,
+                Margin = new Thickness(0, 0, 0, 6)
+            });
+            stack.Children.Add(new TextBlock
+            {
+                Text = "Elegí la ticketera conectada a esta PC para imprimir las comandas de cocina:",
+                FontSize = 12,
+                Foreground = KTheme.Muted,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 14)
+            });
+
+            var printerCombo = new ComboBox { Padding = new Thickness(10, 7, 10, 7), FontSize = 13, Margin = new Thickness(0, 0, 0, 18) };
+            foreach (var p in EscPosPrinter.ListInstalledPrinters())
+                printerCombo.Items.Add(p);
+
+            printerCombo.SelectedItem = _localKitchenPrinter;
+            if (printerCombo.SelectedItem == null && printerCombo.Items.Count > 0)
+                printerCombo.SelectedIndex = 0;
+            stack.Children.Add(printerCombo);
+
+            var btnsRow = new UniformGrid { Columns = 2 };
+            var btnTest = CreateSecondaryButton("🖨️ Imprimir Prueba", () =>
+            {
+                if (printerCombo.SelectedItem != null)
+                {
+                    _localKitchenPrinter = printerCombo.SelectedItem.ToString();
+                    File.WriteAllText(_printerConfigPath, _localKitchenPrinter, Encoding.UTF8);
+                }
+                try
+                {
+                    var testSettings = new PosSettings { PrinterName = _localKitchenPrinter, PaperWidthMm = 80, PrintTicketLogo = false };
+                    EscPosPrinter.PrintTestTicket(testSettings);
+                    MessageBox.Show(win, "Prueba enviada a " + _localKitchenPrinter, "Ticketera de Cocina", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(win, ex.Message, "Error en Ticketera", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            });
+            btnTest.Margin = new Thickness(0, 0, 8, 0);
+            btnsRow.Children.Add(btnTest);
+
+            var btnSave = CreateSuccessButton("✓ Guardar Impresora", () =>
+            {
+                if (printerCombo.SelectedItem != null)
+                {
+                    _localKitchenPrinter = printerCombo.SelectedItem.ToString();
+                    File.WriteAllText(_printerConfigPath, _localKitchenPrinter, Encoding.UTF8);
+                }
+                win.Close();
+            });
+            btnsRow.Children.Add(btnSave);
+            stack.Children.Add(btnsRow);
+
+            win.Content = stack;
+            win.ShowDialog();
         }
 
         private void OpenNetworkConfigModal()
@@ -642,9 +748,10 @@ namespace EventosPos
                 });
                 stack.Children.Add(headDock);
 
+                string createdShort = (ord.CreatedAt ?? "").Length >= 16 ? ord.CreatedAt.Substring(0, 16) : (ord.CreatedAt ?? "");
                 stack.Children.Add(new TextBlock
                 {
-                    Text = "Hora de pedido: " + ord.CreatedAt,
+                    Text = "Hora de pedido: " + createdShort,
                     FontSize = 12,
                     Foreground = KTheme.Muted,
                     Margin = new Thickness(0, 0, 0, 10)
@@ -689,6 +796,21 @@ namespace EventosPos
                         Foreground = KTheme.Text,
                         TextWrapping = TextWrapping.Wrap
                     });
+                    if (it.PackChoices != null && it.PackChoices.Count > 0)
+                    {
+                        foreach (var pc in it.PackChoices)
+                        {
+                            itemTextStack.Children.Add(new TextBlock
+                            {
+                                Text = "   • " + pc.Quantity + "x " + pc.ProductName,
+                                FontSize = 13,
+                                FontWeight = FontWeights.SemiBold,
+                                Foreground = KTheme.Text,
+                                TextWrapping = TextWrapping.Wrap,
+                                Margin = new Thickness(0, 1, 0, 0)
+                            });
+                        }
+                    }
                     if (!string.IsNullOrWhiteSpace(it.Note))
                     {
                         itemTextStack.Children.Add(new TextBlock
@@ -734,7 +856,7 @@ namespace EventosPos
 
                 var btnPrint = CreateSecondaryButton("🖨️", () =>
                 {
-                    try { EscPosPrinter.PrintOrder(ordCopy, _db.Settings, true); }
+                    try { PrintComandaWithKitchenPrinter(ordCopy); }
                     catch (Exception ex) { MessageBox.Show(ex.Message, "Ticketera", MessageBoxButton.OK, MessageBoxImage.Error); }
                 });
                 btnPrint.Margin = new Thickness(0, 0, 6, 0);
@@ -749,7 +871,7 @@ namespace EventosPos
                     actionsDock.Children.Add(btnPrep);
                 }
 
-                var btnDone = CreateSuccessButton("✓ LISTO / ENTREGADO", () => SetOrderStatus(ordCopy.Id, "finalizado"));
+                var btnDone = CreateSuccessButton("✓ PEDIDO LISTO", () => SetOrderStatus(ordCopy.Id, "finalizado"));
                 actionsDock.Children.Add(btnDone);
 
                 stack.Children.Add(actionsDock);
@@ -765,7 +887,7 @@ namespace EventosPos
             {
                 _finishedStack.Children.Add(new TextBlock
                 {
-                    Text = "Todavía no hay pedidos marcados como entregados.",
+                    Text = "Todavía no hay pedidos marcados como listos en cocina.",
                     FontSize = 14,
                     Foreground = KTheme.Muted,
                     Margin = new Thickness(10, 20, 10, 10)
@@ -787,15 +909,17 @@ namespace EventosPos
 
                 var dock = new DockPanel();
                 var ordCopy = ord;
-                var btnReopen = CreateSecondaryButton("↩ Devolver a Pendiente", () => SetOrderStatus(ordCopy.Id, "pendiente"));
+                var btnReopen = CreateSecondaryButton("↩ Volver a Pendiente", () => SetOrderStatus(ordCopy.Id, "pendiente"));
                 DockPanel.SetDock(btnReopen, Dock.Right);
                 dock.Children.Add(btnReopen);
 
+                string finTime = (ord.FinishedAt ?? "").Length >= 5 ? ord.FinishedAt.Substring(0, 5) : (ord.FinishedAt ?? "");
+                string stateLabel = ord.KitchenStatus == "entregado" ? "Entregado por Caja" : ("Listo en Cocina " + finTime).Trim();
                 string summary = string.Join(", ", ord.Items.Select(i => i.Quantity + "x " + i.ProductName));
                 dock.Children.Add(new TextBlock
                 {
-                    Text = string.Format("PEDIDO #{0:000}   ·   Entregado: {1}   ·   {2}",
-                        ord.TicketNumber, ord.FinishedAt, summary),
+                    Text = string.Format("PEDIDO #{0:000}   ·   {1}   ·   {2}",
+                        ord.TicketNumber, stateLabel, summary),
                     FontSize = 14,
                     FontWeight = FontWeights.SemiBold,
                     Foreground = KTheme.Text,
@@ -822,7 +946,7 @@ namespace EventosPos
                     if (target != null)
                     {
                         target.KitchenStatus = newStatus;
-                        target.FinishedAt = newStatus == "finalizado" ? DateTime.Now.ToString("HH:mm:ss") : "";
+                        target.FinishedAt = newStatus == "finalizado" ? DateTime.Now.ToString("HH:mm") : "";
                         target.KitchenPrinted = true;
                         PosStore.Save(_db);
                     }

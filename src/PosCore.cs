@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -23,6 +25,13 @@ namespace EventosPos
         public string Description { get; set; }
     }
 
+    public class PackFlavorChoice
+    {
+        public int ProductId { get; set; }
+        public string ProductName { get; set; }
+        public int Quantity { get; set; }
+    }
+
     public class ProductItem
     {
         public int Id { get; set; }
@@ -33,6 +42,8 @@ namespace EventosPos
         public bool StockEnabled { get; set; }
         public int StockQty { get; set; }
         public bool IsCombo { get; set; }
+        public int PackRequiredQty { get; set; }       // 0 = normal, 6 = Media Docena, 12 = Docena
+        public string PackSourceFilter { get; set; }   // ej: "Empanada" para tomar todos los sabores de empanada
         public string Description { get; set; }
         public string ImagePath { get; set; }
         public bool Active { get; set; }
@@ -47,6 +58,12 @@ namespace EventosPos
         public decimal UnitPrice { get; set; }
         public decimal Subtotal { get; set; }
         public string Note { get; set; }
+        public List<PackFlavorChoice> PackChoices { get; set; }
+
+        public OrderLineItem()
+        {
+            PackChoices = new List<PackFlavorChoice>();
+        }
     }
 
     public class OrderRecord
@@ -61,10 +78,11 @@ namespace EventosPos
         public decimal ChangeAmount { get; set; }
         public string Notes { get; set; }
         public string Status { get; set; } // "completado", "anulado"
-        public string KitchenStatus { get; set; } // "pendiente", "preparando", "finalizado"
+        public string KitchenStatus { get; set; } // "pendiente", "preparando", "finalizado" (Listo en cocina), "entregado" (Despachado en Caja)
         public bool KitchenPrinted { get; set; }
         public string CreatedAt { get; set; }
         public string FinishedAt { get; set; }
+        public string DeliveredAt { get; set; }
         public List<OrderLineItem> Items { get; set; }
 
         public OrderRecord()
@@ -101,9 +119,21 @@ namespace EventosPos
         public string MpAlias { get; set; }
         public int NextTicketSequence { get; set; }
         public int PaperWidthMm { get; set; }
-        public bool PrintDoubleTicket { get; set; }
+        public int ClientTicketCopies { get; set; }     // 1 a 4 copias iguales del ticket de cliente
+        public bool PrintDoubleTicket { get; set; }     // Desactivado por defecto (Cocina_POS imprime las suyas)
         public string PrinterName { get; set; }
+        public string KitchenPrinterName { get; set; }  // Vacío = misma ticketera que Caja
         public string TicketFooter { get; set; }
+
+        // Métodos de pago configurables
+        public bool EnableCash { get; set; }
+        public bool EnableTransfer { get; set; }
+        public bool EnableCard { get; set; }
+
+        // Personalización del Logo en el Ticket
+        public string TicketLogoPath { get; set; }
+        public bool PrintTicketLogo { get; set; }
+        public int TicketLogoWidthPx { get; set; }
 
         public PosSettings()
         {
@@ -112,9 +142,17 @@ namespace EventosPos
             MpAlias = "araucana24";
             NextTicketSequence = 1;
             PaperWidthMm = 80;
-            PrintDoubleTicket = true;
+            ClientTicketCopies = 1;
+            PrintDoubleTicket = false; // Desactivado por defecto porque Cocina_POS imprime sus comandas
             PrinterName = "Xprinter XP-80";
-            TicketFooter = "Mercado Pago Alias: araucana24 - ¡Gracias por colaborar!";
+            KitchenPrinterName = "";
+            TicketFooter = "Alias Transferencia: araucana24 - ¡Gracias por colaborar!";
+            EnableCash = true;
+            EnableTransfer = true;
+            EnableCard = false; // Desactivada por defecto según solicitud
+            TicketLogoPath = "";
+            PrintTicketLogo = true;
+            TicketLogoWidthPx = 280;
         }
     }
 
@@ -176,6 +214,16 @@ namespace EventosPos
                         if (payload != null)
                         {
                             if (payload.Settings == null) payload.Settings = new PosSettings();
+                            if (!payload.Settings.EnableCash && !payload.Settings.EnableTransfer && !payload.Settings.EnableCard)
+                            {
+                                payload.Settings.EnableCash = true;
+                                payload.Settings.EnableTransfer = true;
+                                payload.Settings.EnableCard = false;
+                            }
+                            if (payload.Settings.TicketLogoWidthPx <= 0)
+                                payload.Settings.TicketLogoWidthPx = 280;
+                            if (payload.Settings.ClientTicketCopies < 1 || payload.Settings.ClientTicketCopies > 4)
+                                payload.Settings.ClientTicketCopies = 1;
                             if (payload.MenuGroups == null || payload.MenuGroups.Count == 0)
                                 payload.MenuGroups = GetDefaultMenuGroups();
                             if (payload.Products == null || payload.Products.Count == 0)
@@ -184,6 +232,37 @@ namespace EventosPos
                             foreach (var p in payload.Products)
                             {
                                 if (p.GroupId <= 0) p.GroupId = 1;
+                                // Auto-configurar packs de empanadas existentes si vienen de una versión anterior
+                                string lowName = (p.Name ?? "").ToLowerInvariant();
+                                if (p.PackRequiredQty == 0 && lowName.Contains("docena") && lowName.Contains("empanada"))
+                                {
+                                    p.PackRequiredQty = lowName.Contains("media") ? 6 : 12;
+                                    p.PackSourceFilter = "Empanada";
+                                    p.IsCombo = true;
+                                }
+                            }
+
+                            // Asegurar que exista Media Docena de Empanadas en el Grupo 1 si aún no existía
+                            if (payload.Products.Any(p => p.GroupId == 1 && (p.Name ?? "").ToLowerInvariant().Contains("docena de empanadas"))
+                                && !payload.Products.Any(p => p.GroupId == 1 && (p.Name ?? "").ToLowerInvariant().Contains("media docena")))
+                            {
+                                int nextPid = payload.Products.Max(p => p.Id) + 1;
+                                payload.Products.Add(new ProductItem
+                                {
+                                    Id = nextPid,
+                                    GroupId = 1,
+                                    Name = "Media Docena de Empanadas",
+                                    Category = "Para Llevar",
+                                    Price = 8000,
+                                    StockEnabled = false,
+                                    StockQty = 0,
+                                    IsCombo = true,
+                                    PackRequiredQty = 6,
+                                    PackSourceFilter = "Empanada",
+                                    Description = "6 unidades a elección (descuenta stock por sabor)",
+                                    ImagePath = "docena_emp.png",
+                                    Active = true
+                                });
                             }
 
                             if (payload.Settings.ActiveMenuGroupId <= 0 || !payload.MenuGroups.Any(g => g.Id == payload.Settings.ActiveMenuGroupId))
@@ -278,9 +357,11 @@ namespace EventosPos
                 MpAlias = "araucana24",
                 NextTicketSequence = 1,
                 PaperWidthMm = 80,
-                PrintDoubleTicket = true,
+                ClientTicketCopies = 1,
+                PrintDoubleTicket = false,
                 PrinterName = EscPosPrinter.DetectPreferredPrinter(),
-                TicketFooter = "Mercado Pago Alias: araucana24 - ¡Gracias por colaborar!"
+                KitchenPrinterName = "",
+                TicketFooter = "Alias Transferencia: araucana24 - ¡Gracias por colaborar!"
             };
 
             var db = new PosDatabasePayload
@@ -313,11 +394,11 @@ namespace EventosPos
                 // Grupo 1: Almuerzo y Buffet Araucana
                 new ProductItem { Id = 1, GroupId = 1, Name = "Almuerzo Completo", Category = "Almuerzo", Price = 30000, StockEnabled = true, StockQty = 100, IsCombo = true, Description = "Entrada (Berenjena/Rusa) + Milanesa Napolitana + Café y Brownie", ImagePath = "almuerzo.png", Active = true },
                 new ProductItem { Id = 2, GroupId = 1, Name = "Porción de Muzza", Category = "Principales", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Porción individual", ImagePath = "muzza.png", Active = true },
-                new ProductItem { Id = 3, GroupId = 1, Name = "Empanada de Carne", Category = "Principales", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Unidad al horno", ImagePath = "emp_carne.png", Active = true },
-                new ProductItem { Id = 4, GroupId = 1, Name = "Empanada Jamón y Queso", Category = "Principales", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Unidad al horno", ImagePath = "emp_jyq.png", Active = true },
-                new ProductItem { Id = 5, GroupId = 1, Name = "Empanada de Pollo", Category = "Principales", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Unidad al horno", ImagePath = "emp_pollo.png", Active = true },
-                new ProductItem { Id = 6, GroupId = 1, Name = "Empanada de Roquefort", Category = "Principales", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Unidad al horno", ImagePath = "emp_roquefort.png", Active = true },
-                new ProductItem { Id = 7, GroupId = 1, Name = "Empanada Caprese", Category = "Principales", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Unidad al horno", ImagePath = "emp_caprese.png", Active = true },
+                new ProductItem { Id = 3, GroupId = 1, Name = "Empanada de Carne", Category = "Empanadas", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Unidad al horno", ImagePath = "emp_carne.png", Active = true },
+                new ProductItem { Id = 4, GroupId = 1, Name = "Empanada Jamón y Queso", Category = "Empanadas", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Unidad al horno", ImagePath = "emp_jyq.png", Active = true },
+                new ProductItem { Id = 5, GroupId = 1, Name = "Empanada de Pollo", Category = "Empanadas", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Unidad al horno", ImagePath = "emp_pollo.png", Active = true },
+                new ProductItem { Id = 6, GroupId = 1, Name = "Empanada de Roquefort", Category = "Empanadas", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Unidad al horno", ImagePath = "emp_roquefort.png", Active = true },
+                new ProductItem { Id = 7, GroupId = 1, Name = "Empanada Caprese", Category = "Empanadas", Price = 1500, StockEnabled = false, StockQty = 0, Description = "Unidad al horno", ImagePath = "emp_caprese.png", Active = true },
                 new ProductItem { Id = 8, GroupId = 1, Name = "Pancho", Category = "Principales", Price = 2000, StockEnabled = false, StockQty = 0, Description = "Con aderezos a elección", ImagePath = "pancho.png", Active = true },
                 new ProductItem { Id = 9, GroupId = 1, Name = "Sandwich J&Q", Category = "Principales", Price = 3000, StockEnabled = false, StockQty = 0, Description = "Jamón y Queso", ImagePath = "sandwich.png", Active = true },
                 new ProductItem { Id = 10, GroupId = 1, Name = "Gaseosa 500cc Pepsi", Category = "Bebidas", Price = 2000, StockEnabled = false, StockQty = 0, Description = "Botella 500cc", ImagePath = "pepsi.png", Active = true },
@@ -328,7 +409,8 @@ namespace EventosPos
                 new ProductItem { Id = 15, GroupId = 1, Name = "Agua Saborizada Pomelo", Category = "Bebidas", Price = 800, StockEnabled = false, StockQty = 0, Description = "Vaso 200ml", ImagePath = "sab_pomelo.png", Active = true },
                 new ProductItem { Id = 16, GroupId = 1, Name = "Café", Category = "Bebidas", Price = 500, StockEnabled = false, StockQty = 0, Description = "Pocillo / Vaso", ImagePath = "cafe.png", Active = true },
                 new ProductItem { Id = 17, GroupId = 1, Name = "PrePizza x3", Category = "Para Llevar", Price = 4500, StockEnabled = false, StockQty = 0, Description = "Pack de 3 prepizzas", ImagePath = "prepizza.png", Active = true },
-                new ProductItem { Id = 18, GroupId = 1, Name = "Docena de Empanadas", Category = "Para Llevar", Price = 15000, StockEnabled = false, StockQty = 0, IsCombo = true, Description = "12 unidades a elección", ImagePath = "docena_emp.png", Active = true },
+                new ProductItem { Id = 18, GroupId = 1, Name = "Docena de Empanadas", Category = "Para Llevar", Price = 15000, StockEnabled = false, StockQty = 0, IsCombo = true, PackRequiredQty = 12, PackSourceFilter = "Empanadas", Description = "12 unidades a elección (enlazado a stock de Empanadas)", ImagePath = "docena_emp.png", Active = true },
+                new ProductItem { Id = 29, GroupId = 1, Name = "Media Docena de Empanadas", Category = "Para Llevar", Price = 8000, StockEnabled = false, StockQty = 0, IsCombo = true, PackRequiredQty = 6, PackSourceFilter = "Empanadas", Description = "6 unidades a elección (enlazado a stock de Empanadas)", ImagePath = "docena_emp.png", Active = true },
                 new ProductItem { Id = 19, GroupId = 1, Name = "Tarta de Ricota", Category = "Postres", Price = 15000, StockEnabled = false, StockQty = 0, Description = "Tarta entera", ImagePath = "tarta_ricota.png", Active = true },
                 new ProductItem { Id = 20, GroupId = 1, Name = "Pastafrola de Membrillo", Category = "Postres", Price = 15000, StockEnabled = false, StockQty = 0, Description = "Pastafrola entera", ImagePath = "pastafrola.png", Active = true },
                 new ProductItem { Id = 21, GroupId = 1, Name = "Brownie", Category = "Postres", Price = 2500, StockEnabled = false, StockQty = 0, Description = "Porción individual", ImagePath = "brownie.png", Active = true },
@@ -355,7 +437,7 @@ namespace EventosPos
             var validOrders = db.Orders.Where(o => o.SessionId == session.Id && o.Status == "completado").ToList();
             session.OrdersCount = validOrders.Count;
             session.CashSales = validOrders.Where(o => o.PaymentMethod == "Efectivo").Sum(o => o.Total);
-            session.MpSales = validOrders.Where(o => o.PaymentMethod == "Mercado Pago").Sum(o => o.Total);
+            session.MpSales = validOrders.Where(o => o.PaymentMethod == "Transferencia" || o.PaymentMethod == "Mercado Pago").Sum(o => o.Total);
             session.CardSales = validOrders.Where(o => o.PaymentMethod == "Tarjeta").Sum(o => o.Total);
             session.TotalSales = validOrders.Sum(o => o.Total);
             session.ExpectedCash = session.OpeningCash + session.CashSales;
@@ -504,7 +586,12 @@ namespace EventosPos
                                     if (ord != null)
                                     {
                                         ord.KitchenStatus = newStatus;
-                                        ord.FinishedAt = newStatus == "finalizado" ? DateTime.Now.ToString("HH:mm:ss") : "";
+                                        if (newStatus == "finalizado")
+                                            ord.FinishedAt = DateTime.Now.ToString("HH:mm");
+                                        else if (newStatus == "entregado")
+                                            ord.DeliveredAt = DateTime.Now.ToString("HH:mm");
+                                        else
+                                            ord.FinishedAt = "";
                                         ord.KitchenPrinted = true;
                                         PosStore.Save(db);
                                     }
@@ -718,6 +805,11 @@ namespace EventosPos
             foreach (var it in order.Items)
             {
                 sb.AppendLine(TwoCols(string.Format("{0}x {1}", it.Quantity, it.ProductName), PosStore.FormatMoney(it.Subtotal), cols));
+                if (it.PackChoices != null && it.PackChoices.Count > 0)
+                {
+                    foreach (var pc in it.PackChoices)
+                        sb.AppendLine(string.Format("   - {0}x {1}", pc.Quantity, CleanAscii(pc.ProductName)));
+                }
                 if (!string.IsNullOrWhiteSpace(it.Note))
                     sb.AppendLine("   * " + CleanAscii(it.Note));
             }
@@ -726,9 +818,9 @@ namespace EventosPos
             sb.AppendLine(TwoCols("TOTAL:", PosStore.FormatMoney(order.Total), cols));
             sb.AppendLine(TwoCols("MEDIO DE PAGO:", order.PaymentMethod.ToUpperInvariant(), cols));
 
-            if (order.PaymentMethod == "Mercado Pago")
+            if (order.PaymentMethod == "Transferencia" || order.PaymentMethod == "Mercado Pago")
             {
-                sb.AppendLine(TwoCols("ALIAS MP:", settings.MpAlias, cols));
+                sb.AppendLine(TwoCols("ALIAS TRANSF.:", settings.MpAlias, cols));
             }
             else if (order.PaymentMethod == "Efectivo" && order.AmountReceived > 0)
             {
@@ -760,6 +852,11 @@ namespace EventosPos
                 foreach (var it in order.Items)
                 {
                     sb.AppendLine(string.Format("[{0}x] {1}", it.Quantity, CleanAscii(it.ProductName).ToUpperInvariant()));
+                    if (it.PackChoices != null && it.PackChoices.Count > 0)
+                    {
+                        foreach (var pc in it.PackChoices)
+                            sb.AppendLine(string.Format("   - {0}x {1}", pc.Quantity, CleanAscii(pc.ProductName).ToUpperInvariant()));
+                    }
                     if (!string.IsNullOrWhiteSpace(it.Note))
                         sb.AppendLine("   >> " + CleanAscii(it.Note).ToUpperInvariant());
                 }
@@ -772,6 +869,96 @@ namespace EventosPos
             }
 
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// Convierte una imagen (PNG/JPG/BMP) en comandos ESC/POS raster (GS v 0) optimizados
+        /// para impresoras térmicas de 80mm (máx 576 dots) o 58mm (máx 384 dots).
+        /// Compone sobre fondo blanco para soportar PNGs con transparencia sin manchas negras.
+        /// </summary>
+        public static byte[] BuildLogoEscPosRasterBytes(PosSettings settings)
+        {
+            if (settings == null || !settings.PrintTicketLogo || string.IsNullOrWhiteSpace(settings.TicketLogoPath))
+                return null;
+
+            string fullPath = Path.IsPathRooted(settings.TicketLogoPath)
+                ? settings.TicketLogoPath
+                : Path.Combine(PosStore.ImagesDir, settings.TicketLogoPath);
+
+            if (!File.Exists(fullPath))
+                return null;
+
+            try
+            {
+                using (var src = new Bitmap(fullPath))
+                {
+                    int maxDots = settings.PaperWidthMm == 58 ? 320 : 440;
+                    int desiredW = settings.TicketLogoWidthPx > 0 ? settings.TicketLogoWidthPx : 280;
+                    int targetW = Math.Min(maxDots, Math.Max(120, desiredW));
+                    // Redondear ancho a múltiplo exacto de 8 píxeles para GS v 0
+                    targetW = (targetW / 8) * 8;
+                    if (targetW < 8) targetW = 8;
+
+                    double ratio = (double)src.Height / Math.Max(1, src.Width);
+                    int targetH = (int)Math.Round(targetW * ratio);
+                    // Limitar altura máxima para que el ticket quede prolijo y no desperdicie papel
+                    if (targetH > 200)
+                    {
+                        targetH = 200;
+                        targetW = ((int)Math.Round(targetH / ratio) / 8) * 8;
+                        if (targetW < 8) targetW = 8;
+                    }
+
+                    using (var resized = new Bitmap(targetW, targetH, System.Drawing.Imaging.PixelFormat.Format24bppRgb))
+                    {
+                        using (var g = Graphics.FromImage(resized))
+                        {
+                            g.Clear(Color.White);
+                            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                            g.SmoothingMode = SmoothingMode.HighQuality;
+                            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                            g.DrawImage(src, 0, 0, targetW, targetH);
+                        }
+
+                        int widthBytes = targetW / 8;
+                        var ms = new MemoryStream();
+                        // Centrar imagen
+                        ms.Write(new byte[] { 0x1B, 0x61, 0x01 }, 0, 3);
+                        // Comando ESC/POS GS v 0 (m = 0 normal)
+                        ms.Write(new byte[]
+                        {
+                            0x1D, 0x76, 0x30, 0x00,
+                            (byte)(widthBytes & 0xFF), (byte)((widthBytes >> 8) & 0xFF),
+                            (byte)(targetH & 0xFF), (byte)((targetH >> 8) & 0xFF)
+                        }, 0, 8);
+
+                        for (int y = 0; y < targetH; y++)
+                        {
+                            for (int bx = 0; bx < widthBytes; bx++)
+                            {
+                                byte slice = 0;
+                                for (int bit = 0; bit < 8; bit++)
+                                {
+                                    int x = bx * 8 + bit;
+                                    Color c = resized.GetPixel(x, y);
+                                    double luma = 0.299 * c.R + 0.587 * c.G + 0.114 * c.B;
+                                    if (luma < 165)
+                                    {
+                                        slice |= (byte)(1 << (7 - bit));
+                                    }
+                                }
+                                ms.WriteByte(slice);
+                            }
+                        }
+                        ms.WriteByte(0x0A); // Pequeño salto de línea debajo del logo
+                        return ms.ToArray();
+                    }
+                }
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         public static void PrintOrder(OrderRecord order, PosSettings settings, bool onlyKitchen = false)
@@ -808,65 +995,87 @@ namespace EventosPos
 
             write(INIT); write(FONT_A); write(MARGIN_ZERO); write(WIDTH_FULL);
 
+            string cajaPrinter = string.IsNullOrWhiteSpace(settings.PrinterName) ? DetectPreferredPrinter() : settings.PrinterName;
+            string kitchenPrinter = string.IsNullOrWhiteSpace(settings.KitchenPrinterName) ? cajaPrinter : settings.KitchenPrinterName;
+            int copies = Math.Max(1, Math.Min(4, settings.ClientTicketCopies));
+
             if (!onlyKitchen)
             {
-                write(ALIGN_CENTER);
-                write(BOLD_ON); write(SIZE_TALL);
-                line((order.EventName ?? settings.EventName).ToUpperInvariant());
-                write(SIZE_NORMAL);
-                line("COMPROBANTE DE CLIENTE");
-                write(BOLD_OFF);
-                line(sepEq);
-
-                write(BOLD_ON); write(SIZE_LARGE);
-                line(string.Format("PEDIDO #{0:000}", order.TicketNumber));
-                write(SIZE_NORMAL); write(BOLD_OFF);
-                line(order.CreatedAt);
-                line(sepDash);
-
-                write(ALIGN_LEFT);
-                write(BOLD_ON);
-                line(TwoCols("CANT  DESCRIPCION", "IMPORTE", cols));
-                write(BOLD_OFF);
-                line(sepDash);
-
-                foreach (var it in order.Items)
+                // Construir 1 copia del ticket de cliente
+                byte[] logoBytes = BuildLogoEscPosRasterBytes(settings);
+                for (int copyIdx = 0; copyIdx < copies; copyIdx++)
                 {
-                    line(TwoCols(string.Format("{0}x {1}", it.Quantity, it.ProductName), PosStore.FormatMoney(it.Subtotal), cols));
-                    if (!string.IsNullOrWhiteSpace(it.Note))
-                        line("   * " + it.Note);
-                }
+                    write(INIT); write(FONT_A); write(MARGIN_ZERO); write(WIDTH_FULL);
+                    if (logoBytes != null)
+                        write(logoBytes);
 
-                line(sepDash);
-                write(BOLD_ON); write(SIZE_TALL);
-                line(TwoCols("TOTAL:", PosStore.FormatMoney(order.Total), cols));
-                write(SIZE_NORMAL); write(BOLD_OFF);
-
-                line(TwoCols("MEDIO DE PAGO:", order.PaymentMethod.ToUpperInvariant(), cols));
-                if (order.PaymentMethod == "Mercado Pago")
-                {
-                    line(TwoCols("ALIAS MP:", settings.MpAlias, cols));
-                }
-                else if (order.PaymentMethod == "Efectivo" && order.AmountReceived > 0)
-                {
-                    line(TwoCols("PAGA CON:", PosStore.FormatMoney(order.AmountReceived), cols));
-                    write(BOLD_ON);
-                    line(TwoCols("SU VUELTO:", PosStore.FormatMoney(order.ChangeAmount), cols));
+                    write(ALIGN_CENTER);
+                    write(BOLD_ON); write(SIZE_TALL);
+                    line((order.EventName ?? settings.EventName).ToUpperInvariant());
+                    write(SIZE_NORMAL);
+                    line(copies > 1 ? string.Format("COMPROBANTE ({0}/{1})", copyIdx + 1, copies) : "COMPROBANTE DE CLIENTE");
                     write(BOLD_OFF);
-                }
+                    line(sepEq);
 
-                if (!string.IsNullOrWhiteSpace(order.Notes))
-                {
+                    write(BOLD_ON); write(SIZE_LARGE);
+                    line(string.Format("PEDIDO #{0:000}", order.TicketNumber));
+                    write(SIZE_NORMAL); write(BOLD_OFF);
+                    line(order.CreatedAt);
                     line(sepDash);
-                    line("Nota: " + order.Notes);
+
+                    write(ALIGN_LEFT);
+                    write(BOLD_ON);
+                    line(TwoCols("CANT  DESCRIPCION", "IMPORTE", cols));
+                    write(BOLD_OFF);
+                    line(sepDash);
+
+                    foreach (var it in order.Items)
+                    {
+                        line(TwoCols(string.Format("{0}x {1}", it.Quantity, it.ProductName), PosStore.FormatMoney(it.Subtotal), cols));
+                        if (it.PackChoices != null && it.PackChoices.Count > 0)
+                        {
+                            foreach (var pc in it.PackChoices)
+                                line(string.Format("   - {0}x {1}", pc.Quantity, pc.ProductName));
+                        }
+                        if (!string.IsNullOrWhiteSpace(it.Note))
+                            line("   * " + it.Note);
+                    }
+
+                    line(sepDash);
+                    write(BOLD_ON); write(SIZE_TALL);
+                    line(TwoCols("TOTAL:", PosStore.FormatMoney(order.Total), cols));
+                    write(SIZE_NORMAL); write(BOLD_OFF);
+
+                    line(TwoCols("MEDIO DE PAGO:", order.PaymentMethod.ToUpperInvariant(), cols));
+                    if (order.PaymentMethod == "Transferencia" || order.PaymentMethod == "Mercado Pago")
+                    {
+                        line(TwoCols("ALIAS TRANSF.:", settings.MpAlias, cols));
+                    }
+                    else if (order.PaymentMethod == "Efectivo" && order.AmountReceived > 0)
+                    {
+                        line(TwoCols("PAGA CON:", PosStore.FormatMoney(order.AmountReceived), cols));
+                        write(BOLD_ON);
+                        line(TwoCols("SU VUELTO:", PosStore.FormatMoney(order.ChangeAmount), cols));
+                        write(BOLD_OFF);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(order.Notes))
+                    {
+                        line(sepDash);
+                        line("Nota: " + order.Notes);
+                    }
+
+                    line(sepEq);
+                    write(ALIGN_CENTER);
+                    if (!string.IsNullOrWhiteSpace(settings.TicketFooter))
+                        line(settings.TicketFooter);
+                    line("");
+                    write(CUT);
                 }
 
-                line(sepEq);
-                write(ALIGN_CENTER);
-                if (!string.IsNullOrWhiteSpace(settings.TicketFooter))
-                    line(settings.TicketFooter);
-                line("");
-                write(CUT);
+                // Enviar las copias del ticket de cliente a la ticketera de Caja
+                SendRawBytes(cajaPrinter, ms.ToArray());
+                ms = new MemoryStream();
             }
 
             if (onlyKitchen || settings.PrintDoubleTicket)
@@ -887,6 +1096,11 @@ namespace EventosPos
                     write(BOLD_ON); write(SIZE_TALL);
                     line(string.Format("[{0}x] {1}", it.Quantity, it.ProductName.ToUpperInvariant()));
                     write(SIZE_NORMAL);
+                    if (it.PackChoices != null && it.PackChoices.Count > 0)
+                    {
+                        foreach (var pc in it.PackChoices)
+                            line(string.Format("   - {0}x {1}", pc.Quantity, pc.ProductName.ToUpperInvariant()));
+                    }
                     if (!string.IsNullOrWhiteSpace(it.Note))
                         line("   >> OBS: " + it.Note.ToUpperInvariant());
                     write(BOLD_OFF);
@@ -902,10 +1116,10 @@ namespace EventosPos
                 line(sepEq);
                 line("");
                 write(CUT);
-            }
 
-            string printer = string.IsNullOrWhiteSpace(settings.PrinterName) ? DetectPreferredPrinter() : settings.PrinterName;
-            SendRawBytes(printer, ms.ToArray());
+                string targetKitchenPrinter = onlyKitchen ? cajaPrinter : kitchenPrinter;
+                SendRawBytes(targetKitchenPrinter, ms.ToArray());
+            }
         }
 
         public static void PrintCashClosure(CashSession session, List<OrderRecord> sessionOrders, PosSettings settings)
@@ -948,8 +1162,9 @@ namespace EventosPos
             line(TwoCols("PEDIDOS COBRADOS:", session.OrdersCount.ToString(), cols));
             line(sepDash);
             line(TwoCols("VENTAS EFECTIVO:", PosStore.FormatMoney(session.CashSales), cols));
-            line(TwoCols("MERCADO PAGO:", PosStore.FormatMoney(session.MpSales), cols));
-            line(TwoCols("TARJETA:", PosStore.FormatMoney(session.CardSales), cols));
+            line(TwoCols("TRANSFERENCIA:", PosStore.FormatMoney(session.MpSales), cols));
+            if (settings.EnableCard || session.CardSales > 0)
+                line(TwoCols("TARJETA:", PosStore.FormatMoney(session.CardSales), cols));
             line(sepDash);
             write(BOLD_ON);
             line(TwoCols("TOTAL RECAUDADO:", PosStore.FormatMoney(session.TotalSales), cols));
@@ -1005,6 +1220,9 @@ namespace EventosPos
             };
 
             write(new byte[] { 0x1B, 0x40, 0x1B, 0x4D, 0x00, 0x1D, 0x4C, 0x00, 0x00, 0x1D, 0x57, 0x40, 0x02 });
+            byte[] logoBytes = BuildLogoEscPosRasterBytes(settings);
+            if (logoBytes != null)
+                write(logoBytes);
             write(new byte[] { 0x1B, 0x61, 0x01, 0x1B, 0x45, 0x01, 0x1D, 0x21, 0x11 });
             line("PRUEBA TICKETERA");
             write(new byte[] { 0x1D, 0x21, 0x00, 0x1B, 0x45, 0x00 });
@@ -1073,7 +1291,7 @@ namespace EventosPos
 
     public static class GitHubUpdater
     {
-        public const string AppVersion = "1.0.1";
+        public const string AppVersion = "1.0.5";
         public const string GitHubRepo = "Vanessaalberti/sistema-eventos";
 
         private static Version ParseVersionSafe(string raw)
