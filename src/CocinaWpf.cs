@@ -20,16 +20,16 @@ namespace EventosPos
 {
     public static class KTheme
     {
-        public static readonly SolidColorBrush Bg = BrushFromHex("#F5F6F8");
+        public static readonly SolidColorBrush Bg = BrushFromHex("#F6F7F9");
         public static readonly SolidColorBrush Card = BrushFromHex("#FFFFFF");
-        public static readonly SolidColorBrush Border = BrushFromHex("#E5E7EB");
-        public static readonly SolidColorBrush BorderStrong = BrushFromHex("#D1D5DB");
+        public static readonly SolidColorBrush Border = BrushFromHex("#EAECF0");
+        public static readonly SolidColorBrush BorderStrong = BrushFromHex("#D0D5DD");
         public static readonly SolidColorBrush Hover = BrushFromHex("#F3F4F6");
-        public static readonly SolidColorBrush Text = BrushFromHex("#1F2937");
+        public static readonly SolidColorBrush Text = BrushFromHex("#111827");
         public static readonly SolidColorBrush Muted = BrushFromHex("#6B7280");
-        public static readonly SolidColorBrush Brand = BrushFromHex("#0891B2");
-        public static readonly SolidColorBrush BrandDark = BrushFromHex("#0E7490");
-        public static readonly SolidColorBrush BrandBg = BrushFromHex("#E0F7FA");
+        public static readonly SolidColorBrush Brand = BrushFromHex("#3B76F6");
+        public static readonly SolidColorBrush BrandDark = BrushFromHex("#2563EB");
+        public static readonly SolidColorBrush BrandBg = BrushFromHex("#EFF6FF");
         public static readonly SolidColorBrush Ok = BrushFromHex("#16A34A");
         public static readonly SolidColorBrush OkBg = BrushFromHex("#DCFCE7");
         public static readonly SolidColorBrush Warn = BrushFromHex("#CA8A04");
@@ -37,8 +37,8 @@ namespace EventosPos
         public static readonly SolidColorBrush Err = BrushFromHex("#DC2626");
         public static readonly SolidColorBrush ErrBg = BrushFromHex("#FEE2E2");
 
-        public static readonly CornerRadius BtnRadius = new CornerRadius(6);
-        public static readonly CornerRadius CardRadius = new CornerRadius(8);
+        public static readonly CornerRadius BtnRadius = new CornerRadius(7);
+        public static readonly CornerRadius CardRadius = new CornerRadius(10);
 
         public static SolidColorBrush BrushFromHex(string hex)
         {
@@ -680,15 +680,28 @@ namespace EventosPos
                     DockPanel.SetDock(qtyBadge, Dock.Left);
                     itemRow.Children.Add(qtyBadge);
 
-                    itemRow.Children.Add(new TextBlock
+                    var itemTextStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+                    itemTextStack.Children.Add(new TextBlock
                     {
                         Text = it.ProductName,
                         FontSize = 14,
                         FontWeight = FontWeights.Bold,
                         Foreground = KTheme.Text,
-                        VerticalAlignment = VerticalAlignment.Center,
                         TextWrapping = TextWrapping.Wrap
                     });
+                    if (!string.IsNullOrWhiteSpace(it.Note))
+                    {
+                        itemTextStack.Children.Add(new TextBlock
+                        {
+                            Text = "✏️ " + it.Note,
+                            FontSize = 12,
+                            FontWeight = FontWeights.Bold,
+                            Foreground = KTheme.Brand,
+                            TextWrapping = TextWrapping.Wrap,
+                            Margin = new Thickness(0, 2, 0, 0)
+                        });
+                    }
+                    itemRow.Children.Add(itemTextStack);
                     itemsStack.Children.Add(itemRow);
                 }
                 itemsBorder.Child = itemsStack;

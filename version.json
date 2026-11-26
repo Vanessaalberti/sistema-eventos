@@ -1,4 +1,4 @@
 {
-  "version": "1.0.0",
-  "notes": "Versión inicial portable WPF con sincronización LAN y actualización automática desde GitHub."
+  "version": "1.0.1",
+  "notes": "Nueva estética visual moderna en español, tarjetas horizontales con selector rápido +/- y comentarios por artículo (lápiz) visibles en ticket y comanda de cocina."
 }

@@ -46,6 +46,7 @@ namespace EventosPos
         public int Quantity { get; set; }
         public decimal UnitPrice { get; set; }
         public decimal Subtotal { get; set; }
+        public string Note { get; set; }
     }
 
     public class OrderRecord
@@ -717,6 +718,8 @@ namespace EventosPos
             foreach (var it in order.Items)
             {
                 sb.AppendLine(TwoCols(string.Format("{0}x {1}", it.Quantity, it.ProductName), PosStore.FormatMoney(it.Subtotal), cols));
+                if (!string.IsNullOrWhiteSpace(it.Note))
+                    sb.AppendLine("   * " + CleanAscii(it.Note));
             }
 
             sb.AppendLine(sepDash);
@@ -757,6 +760,8 @@ namespace EventosPos
                 foreach (var it in order.Items)
                 {
                     sb.AppendLine(string.Format("[{0}x] {1}", it.Quantity, CleanAscii(it.ProductName).ToUpperInvariant()));
+                    if (!string.IsNullOrWhiteSpace(it.Note))
+                        sb.AppendLine("   >> " + CleanAscii(it.Note).ToUpperInvariant());
                 }
                 if (!string.IsNullOrWhiteSpace(order.Notes))
                 {
@@ -828,6 +833,8 @@ namespace EventosPos
                 foreach (var it in order.Items)
                 {
                     line(TwoCols(string.Format("{0}x {1}", it.Quantity, it.ProductName), PosStore.FormatMoney(it.Subtotal), cols));
+                    if (!string.IsNullOrWhiteSpace(it.Note))
+                        line("   * " + it.Note);
                 }
 
                 line(sepDash);
@@ -879,7 +886,10 @@ namespace EventosPos
                 {
                     write(BOLD_ON); write(SIZE_TALL);
                     line(string.Format("[{0}x] {1}", it.Quantity, it.ProductName.ToUpperInvariant()));
-                    write(SIZE_NORMAL); write(BOLD_OFF);
+                    write(SIZE_NORMAL);
+                    if (!string.IsNullOrWhiteSpace(it.Note))
+                        line("   >> OBS: " + it.Note.ToUpperInvariant());
+                    write(BOLD_OFF);
                 }
 
                 if (!string.IsNullOrWhiteSpace(order.Notes))
@@ -1063,7 +1073,7 @@ namespace EventosPos
 
     public static class GitHubUpdater
     {
-        public const string AppVersion = "1.0.0";
+        public const string AppVersion = "1.0.1";
         public const string GitHubRepo = "Vanessaalberti/sistema-eventos";
 
         private static Version ParseVersionSafe(string raw)
